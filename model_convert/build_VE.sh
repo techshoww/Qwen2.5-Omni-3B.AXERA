@@ -1,0 +1,1 @@
+pulsar2 build --input Qwen2.5-Omni-7B_vision.onnx --config config.json --output_dir build-output-nchw308 --output_name Qwen2.5-Omni-7B_vision.axmodel --target_hardware AX650 --compiler.check 0

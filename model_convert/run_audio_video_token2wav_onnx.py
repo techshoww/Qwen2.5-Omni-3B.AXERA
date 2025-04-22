@@ -73,8 +73,8 @@ model = Qwen2_5OmniModel_Export.from_pretrained(
 model.init_upsampler_downsampler()
 model.thinker.audio_tower.forward = model.thinker.audio_tower.forward_onnx
 model.thinker.visual.forward = model.thinker.visual.forward_onnx_by_second_nchw
-# model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx
-# print("model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data",model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data.shape)
+model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx
+model.token2wav.code2wav_bigvgan_model.forward = model.token2wav.code2wav_bigvgan_model.forward_onnx
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 
 
@@ -85,7 +85,7 @@ video_path = "2.mp4"
 response, audio  = inference(video_path)
 print(response[0])
 sf.write(
-    "output.wav",
+    "output_onnx.wav",
     audio.reshape(-1).detach().cpu().numpy(),
     samplerate=24000,
 )

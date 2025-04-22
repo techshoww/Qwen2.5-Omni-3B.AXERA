@@ -4,6 +4,7 @@ from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
 from modeling_export import Qwen2_5OmniModel_Export
 import librosa
 import audioread
+import soundfile as sf
 from preprocess import Qwen2VLImageProcessorExport
 from transformers.image_utils import PILImageResampling
 # @title inference function
@@ -55,11 +56,11 @@ def inference(video_path):
 
     # inputs["pixel_values_videos"] = pixel_values
 
-    output = model.generate(**inputs, use_audio_in_video=True, return_audio=False)
+    text_ids, audio = model.generate(**inputs, use_audio_in_video=True, return_audio=True)
 
-    text = processor.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    text = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
    
-    return text
+    return text,audio
 
 
 device = torch.device("cuda:7")
@@ -78,5 +79,10 @@ video_path = "2.mp4"
 # video_path="demo.mp4"
 
 ## Use a local HuggingFace model to inference.
-response  = inference(video_path)
-print(response[0])
+response, audio  = inference(video_path)
+print(response[0])      # 嗯，这钢琴弹得还不错呢。你是在练习曲子吗？还是在即兴创作呀要是有什么关于钢琴的问题，都可以跟我说哦。
+sf.write(
+    "output.wav",
+    audio.reshape(-1).detach().cpu().numpy(),
+    samplerate=24000,
+)
