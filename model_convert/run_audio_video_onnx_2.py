@@ -76,7 +76,8 @@ model = Qwen2_5OmniModel_Export.from_pretrained(
 model.init_upsampler_downsampler()
 model.thinker.audio_tower.forward = model.thinker.audio_tower.forward_onnx
 model.thinker.visual.forward = model.thinker.visual.forward_onnx_by_second_nchw
-# model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx
+model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_2parts
+model.token2wav.code2wav_dit_model.part_num = 5
 # print("model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data",model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data.shape)
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 

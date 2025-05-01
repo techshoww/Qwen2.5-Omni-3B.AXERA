@@ -43,7 +43,8 @@ if __name__ == '__main__':
                                 "language_model.model.embed_tokens.weight",
                                 "embed_tokens.weight", 
                                 "model.text_model.embed_tokens.weight",
-                                "thinker.model.embed_tokens.weight"]:
+                                "thinker.model.embed_tokens.weight",
+                                "talker.model.embed_tokens.weight"]:
                         #
                         print(f"find {k} in {file.as_posix()}")
                         res = f.get_tensor(k).to(torch.float32).numpy()

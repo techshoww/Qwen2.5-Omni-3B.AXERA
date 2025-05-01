@@ -11,27 +11,7 @@ Qwen2_5OmniVisionBlock,Qwen2_5OmniVisionSdpaAttention, apply_rotary_pos_emb_visi
 from audio_export import Qwen2_5OmniAudioEncoder_Export
 from token2wav_export import Qwen2_5OmniToken2WavModel_Export
 
-def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
-    L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-    attn_bias = torch.zeros(1, L, S, dtype=query.dtype).to(attn_mask.device)
-    
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-        attn_bias.to(query.dtype)
 
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-        else:
-            attn_bias += attn_mask
-    attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias
-    attn_weight = torch.softmax(attn_weight, dim=-1)
-    attn_weight = torch.dropout(attn_weight, dropout_p, train=False)
-    return attn_weight @ value
 
 class Qwen2_5OmniVisionAttention_Export(Qwen2_5OmniVisionAttention):
     # def __init__(self, dim: int, num_heads: int = 16) -> None:
@@ -479,7 +459,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_Export(Qwen2_5OmniThinkerForCon
 
 
 class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
-    def __init__(self, config, max_len_talker_generate_codes=1000):
+    def __init__(self, config, max_len_talker_generate_codes=600):
         super().__init__(config)
 
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_Export(config.thinker_config)
@@ -628,9 +608,9 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             return thinker_result.sequences
 
         # 2. Generate speech tokens from talker module
-        thinker_generate_ids = thinker_result.sequences[:, input_ids.size(1) :].to(self.talker.device)
-        thinker_token_embeds = [x[0].to(self.talker.device) for x in thinker_result.hidden_states]
-        thinker_hidden_states = [x[1][-1].to(self.talker.device) for x in thinker_result.hidden_states]
+        thinker_generate_ids = thinker_result.sequences[:, input_ids.size(1) :].to(self.talker.device)      # text token ids
+        thinker_token_embeds = [x[0].to(self.talker.device) for x in thinker_result.hidden_states]              # embeds_to_talker, 就是 输入给 thinker lm 的 input_embeds( audio和vision编码用0替代)
+        thinker_hidden_states = [x[1][-1].to(self.talker.device) for x in thinker_result.hidden_states]         # 最后一层过了 norm 的hidden_states, list 长度为输出text长度
 
         talker_text_bos_token = speaker_params["bos_token"]
         talker_input_text_ids = torch.cat(

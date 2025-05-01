@@ -32,9 +32,9 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
     model_simp, check = onnxsim.simplify(onnx_model)
     assert check, "Simplified ONNX model could not be validated"
     onnx.save(model_simp, onnx_output,
-                # save_as_external_data=True,
-                # all_tensors_to_one_file=True,
-                # location=onnx_output+".data"
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location=onnx_output+".data"
                 )
     print("onnx simpilfy successed, and model saved in {}".format(onnx_output))
 

@@ -1,15 +1,363 @@
+import os
+import math
 import onnxruntime as ort 
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniToken2WavDiTModel, ODESolverRK4, \
             Qwen2_5OmniToken2WavModel, Qwen2_5OmniToken2WavConfig, Qwen2_5OmniToken2WavBigVGANModel, Qwen2_5OmniBigVGANConfig, \
-                TorchActivation1d, SnakeBeta, kaiser_sinc_filter1d, AMPBlock, DownSample1d
+                TorchActivation1d, SnakeBeta, kaiser_sinc_filter1d, AMPBlock, DownSample1d, Qwen2_5OmniDiTConfig,\
+                    DiTAttention, apply_rotary_pos_emb, DiTBlock, Res2NetBlock, SERes2NetBlock, ECAPA_TDNN, AttentiveStatisticsPooling,\
+                        InputEmbedding
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
+def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None) -> torch.Tensor:
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    attn_bias = torch.zeros(1, L, S, dtype=query.dtype).to(attn_mask.device)
+    
+    if is_causal:
+        assert attn_mask is None
+        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        attn_bias.to(query.dtype)
+
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn_bias += attn_mask
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    attn_weight = torch.dropout(attn_weight, dropout_p, train=False)
+    return attn_weight @ value
+
+class DiTAttention_Export(DiTAttention):
+    def forward(
+        self,
+        x,  # noised input x
+        rope=None,  # rotary position embedding for x
+        mask=None,
+    ) -> torch.Tensor:
+        batch_size = x.shape[0]
+
+        # `sample` projections.
+        query = self.to_q(x)
+        key = self.to_k(x)
+        value = self.to_v(x)
+
+        # attention
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // self.heads
+        query = query.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+
+        # apply rotary position embedding
+        # Due to training process, only first head is applied with RoPE, will be fixed at next release
+        cos, sin = rope
+        query[:, :1], key[:, :1] = apply_rotary_pos_emb(query[:, :1], key[:, :1], cos, sin)
+
+        # attention_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
+        # x, _ = attention_interface(
+        #     self,
+        #     query,
+        #     key,
+        #     value,
+        #     attention_mask=mask,
+        #     is_causal=False,
+        # )
+
+        # mask. e.g. inference got a batch with different target durations, mask out the padding
+        # x = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
+
+        x = scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
+        x = x.reshape(batch_size, -1, self.heads * head_dim)
+        x = x.to(query.dtype)
+
+        # linear proj
+        x = self.to_out[0](x)
+        # dropout
+        x = self.to_out[1](x)
+
+        return x
+
+class DiTBlock_Export(DiTBlock):
+    def __init__(self, config: Qwen2_5OmniDiTConfig, look_ahead_block=0, look_backward_block=0):
+        super().__init__(config, look_ahead_block, look_backward_block)
+        self.attn = DiTAttention_Export(config)
+
+
+def calculate_same_padding(kernel_size, dilation):
+    """
+    根据 kernel_size 和 dilation 计算 padding_size，
+    使得 Conv1d 输出与输入长度一致（等价于 padding='same'）
+    """
+    return (dilation * (kernel_size - 1)) // 2
+
+class TDNNBlock_Export(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        dilation,
+    ):
+        super().__init__()
+
+        padding_size = calculate_same_padding(kernel_size, dilation)
+
+        self.conv = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            # padding="same",
+            # padding_mode="reflect",
+            padding=padding_size
+        )
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        return self.activation(self.conv(x))
+
+
+class SEBlock_Export(nn.Module):
+    """An implementation of squeeze-and-excitation block.
+
+    Arguments
+    ---------
+    in_channels : int
+        The number of input channels.
+    se_channels : int
+        The number of output channels after squeeze.
+    out_channels : int
+        The number of output channels.
+    """
+
+    def __init__(self, in_channels, se_channels, out_channels):
+        super().__init__()
+
+        self.conv1 = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=se_channels,
+            kernel_size=1,
+            padding="same",
+            # padding_mode="reflect",
+        )
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv1d(
+            in_channels=se_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            padding="same",
+            # padding_mode="reflect",
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        s = x.mean(dim=2, keepdim=True)
+
+        s = self.relu(self.conv1(s))
+        s = self.sigmoid(self.conv2(s))
+
+        return s * x
+
+class Res2NetBlock_Export(Res2NetBlock):
+    def __init__(self, in_channels, out_channels, scale=8, kernel_size=3, dilation=1):
+        super().__init__(in_channels, out_channels, scale, kernel_size, dilation)
+        assert in_channels % scale == 0
+        assert out_channels % scale == 0
+        
+        in_channel = in_channels // scale
+        hidden_channel = out_channels // scale
+       
+        self.blocks = nn.ModuleList(
+            [
+                TDNNBlock_Export(
+                    in_channel,
+                    hidden_channel,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                )
+                for i in range(scale - 1)
+            ]
+        )
+
+class AttentiveStatisticsPooling_Export(AttentiveStatisticsPooling):
+    """This class implements an attentive statistic pooling layer for each channel.
+    It returns the concatenated mean and std of the input tensor.
+
+    Arguments
+    ---------
+    channels: int
+        The number of input channels.
+    attention_channels: int
+        The number of attention channels.
+    """
+
+    def __init__(self, channels, attention_channels=128):
+        super().__init__(channels, attention_channels)
+        self.conv = nn.Conv1d(
+            in_channels=attention_channels,
+            out_channels=channels,
+            kernel_size=1,
+            padding="same",
+            # padding_mode="reflect",
+        )
+
+class SERes2NetBlock_Export(SERes2NetBlock):
+    """An implementation of building block in ECAPA-TDNN, i.e.,
+    TDNN-Res2Net-TDNN-SEBlock.
+
+    Arguments
+    ----------
+    out_channels: int
+        The number of output channels.
+    res2net_scale: int
+        The scale of the Res2Net block.
+    kernel_size: int
+        The kernel size of the TDNN blocks.
+    dilation: int
+        The dilation of the Res2Net block.
+    activation : torch class
+        A class for constructing the activation layers.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        res2net_scale=8,
+        se_channels=128,
+        kernel_size=1,
+        dilation=1,
+    ):
+        super().__init__(in_channels, out_channels, res2net_scale, se_channels, kernel_size, dilation)
+        
+        self.tdnn1 = TDNNBlock_Export(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            dilation=1,
+        )
+        self.res2net_block = Res2NetBlock_Export(out_channels, out_channels, res2net_scale, kernel_size, dilation)
+        self.tdnn2 = TDNNBlock_Export(
+            out_channels,
+            out_channels,
+            kernel_size=1,
+            dilation=1,
+        )
+        self.se_block = SEBlock_Export(out_channels, se_channels, out_channels)
+
+class ECAPA_TDNN_Export(ECAPA_TDNN):
+    """An implementation of the speaker embedding model in a paper.
+    "ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation in
+    TDNN Based Speaker Verification" (https://arxiv.org/abs/2005.07143).
+
+    Arguments
+    ---------
+    device : str
+        Device used, e.g., "cpu" or "cuda".
+    activation : torch class
+        A class for constructing the activation layers.
+    channels : list of ints
+        Output channels for TDNN/SERes2Net layer.
+    kernel_sizes : list of ints
+        List of kernel sizes for each layer.
+    dilations : list of ints
+        List of dilations for kernels in each layer.
+    lin_neurons : int
+        Number of neurons in linear layers.
+    """
+
+    def __init__(self, config: Qwen2_5OmniDiTConfig):
+        super().__init__(config)
+        assert len(config.enc_channels) == len(config.enc_kernel_sizes)
+        assert len(config.enc_channels) == len(config.enc_dilations)
+       
+        self.blocks = nn.ModuleList()
+        # The initial TDNN layer
+        self.blocks.append(
+            TDNNBlock_Export(
+                config.mel_dim,
+                config.enc_channels[0],
+                config.enc_kernel_sizes[0],
+                config.enc_dilations[0],
+            )
+        )
+
+        # SE-Res2Net layers
+        for i in range(1, len(config.enc_channels) - 1):
+            self.blocks.append(
+                SERes2NetBlock_Export(
+                    config.enc_channels[i - 1],
+                    config.enc_channels[i],
+                    res2net_scale=config.enc_res2net_scale,
+                    se_channels=config.enc_se_channels,
+                    kernel_size=config.enc_kernel_sizes[i],
+                    dilation=config.enc_dilations[i],
+                )
+            )
+
+        # Multi-layer feature aggregation
+        self.mfa = TDNNBlock_Export(
+            config.enc_channels[-1],
+            config.enc_channels[-1],
+            config.enc_kernel_sizes[-1],
+            config.enc_dilations[-1],
+        )
+
+        # Attentive Statistical Pooling
+        self.asp = AttentiveStatisticsPooling_Export(
+            config.enc_channels[-1],
+            attention_channels=config.enc_attention_channels,
+        )
+
+        # Final linear transformation
+        self.fc = nn.Conv1d(
+            in_channels=config.enc_channels[-1] * 2,
+            out_channels=config.enc_dim,
+            kernel_size=1,
+            padding="same",
+            # padding_mode="reflect",
+        )
+
+class InputEmbedding_Export(InputEmbedding):
+    def __init__(self, config: Qwen2_5OmniDiTConfig):
+        super().__init__(config)
+        
+        self.spk_encoder = ECAPA_TDNN_Export(config)
+
+
 class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
+    def __init__(self, config: Qwen2_5OmniDiTConfig):
+        super().__init__(config)
+        self.input_embed = InputEmbedding_Export(config)
+
+        self.part_num = 1
+        self.part_idx = 0
+        # self.transformer_blocks = nn.ModuleList()
+        # for i in range(config.num_hidden_layers):
+        #     self.transformer_blocks.append(
+        #         DiTBlock_Export(
+        #             config,
+        #             look_ahead_block=1 if i in config.look_ahead_layers else 0,
+        #             look_backward_block=1 if i in config.look_backward_layers else 0,
+        #         )
+        #     )
+
+
+        # if os.path.exists("block_diff.pth"):
+        #     self.block_diff = torch.load("block_diff.pth").to(self.device)
+
+        if os.path.exists("rope.pth"):
+            self.rope = torch.load("rope.pth")
+            self.rope = (self.rope[0].to(self.device), self.rope[1].to(self.device))
+
 
     def forward_onnx(self,
         x,  # nosied input audio
@@ -27,7 +375,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         print("time",time)
         session = ort.InferenceSession("token2wav_dit.onnx", providers=["CPUExecutionProvider"])
 
-        inputs = {"x":x.cpu().numpy(), "cond":cond.cpu().numpy(), "spk":spk.cpu().numpy(), "code":code.cpu().numpy(), "time":time.cpu().numpy()}
+        inputs = {"x":x.cpu().numpy(), "cond":cond.cpu().numpy(), "spk":spk.cpu().numpy(), "code":code.cpu().numpy(), "time":time.repeat(x.shape[0]).cpu().numpy()}
         out = session.run(["output"], inputs)[0]
         out = torch.from_numpy(out).to(x.device)
         return out 
@@ -55,10 +403,6 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         torch.save(code, "code.pth")
         torch.save(time, "time.pth")
         
-        batch = x.shape[0]
-        if time.ndim == 0:
-            time = time.repeat(batch)
-
         # t: conditioning time, c: context (code + masked cond audio), x: noised input audio
         t = self.time_embed(time)
         code_embed = self.text_embed(code, drop_code=False if cfg else drop_code)
@@ -76,8 +420,13 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         # rope = self.rotary_embed(x, torch.arange(seq_len, device=x.device).repeat(batch, 1))
         rope = self.rotary_embed(hidden)
 
+        # if os.path.exists("block_diff.pth"):
+        #     block_diff = self.block_diff
+        # else:
+        #     block_diff = self._create_block_diff(hidden)
+        #     self.block_diff = block_diff
+        #     torch.save(block_diff, "block_diff.pth")
         block_diff = self._create_block_diff(hidden)
-
         for block in self.transformer_blocks:
             hidden = block(hidden, t, rope=rope, block_diff=block_diff)
 
@@ -85,6 +434,275 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         output = self.proj_out(hidden)
 
         return output
+
+    def forward_part1(
+        self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        drop_audio_cond=False,  # cfg for cond audio
+        drop_code=False,  # cfg for code
+        cfg=True,
+    ):
+        print(f"--------run forward_part {1}/{self.part_num}---------------------------")
+        print("x",x.shape)
+        print("cond",cond.shape)
+        print("spk",spk.shape)
+        print("code",code.shape)
+        print("time",time)
+        torch.save(x, "x.pth")
+        torch.save(cond, "cond.pth")
+        torch.save(spk, "spk.pth")
+        torch.save(code, "code.pth")
+        torch.save(time, "time.pth")
+        
+        # t: conditioning time, c: context (code + masked cond audio), x: noised input audio
+        t = self.time_embed(time)
+        code_embed = self.text_embed(code, drop_code=False if cfg else drop_code)
+        code_embed_uncond = self.text_embed(code, drop_code=True) if cfg else None
+        hidden = self.input_embed(
+            x,
+            spk,
+            cond,
+            code_embed,
+            drop_audio_cond=drop_audio_cond,
+            code_embed_uncond=code_embed_uncond,
+            cfg=cfg,
+        )
+
+        # rope = self.rotary_embed(x, torch.arange(seq_len, device=x.device).repeat(batch, 1))
+        rope = self.rotary_embed(hidden)
+        self.rope = rope
+        torch.save(rope, "rope.pth")
+
+        block_diff = self._create_block_diff(hidden)
+
+        num_blocks = len(self.transformer_blocks)
+        num_part1 = round(num_blocks/self.part_num)
+        
+        for block in self.transformer_blocks[0:num_part1]:
+            hidden = block(hidden, t, rope=rope, block_diff=block_diff)
+
+        if self.part_num==1:
+            hidden = self.norm_out(hidden, t)
+            hidden = self.proj_out(hidden)
+
+        return hidden,  t
+
+    def forward_part1_onnx(self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        ):
+
+        print(f"--------run forward_part {1}/{self.part_num}---------------------------")
+        print("x",x.shape)
+        print("cond",cond.shape)
+        print("spk",spk.shape)
+        print("code",code.shape)
+        print("time",time)
+        session = ort.InferenceSession("token2wav_dit_part1.onnx", providers=["CPUExecutionProvider"])
+
+        inputs = {"x":x.cpu().numpy(), "cond":cond.cpu().numpy(), "spk":spk.cpu().numpy(), "code":code.cpu().numpy(), "time":time.repeat(x.shape[0]).cpu().numpy()}
+        hidden, t = session.run(["hidden",  "t"], inputs)
+        hidden = torch.from_numpy(hidden).to(x.device)
+        t = torch.from_numpy(t).to(x.device)
+        return hidden,  t
+
+    def forward_part2(
+        self,
+        hidden, 
+        t,
+    ):
+        print(f"--------run forward_part {self.part_idx+1}/{self.part_num}---------------------------")
+        print("hidden",hidden.shape)
+        print("t", t.shape)
+        torch.save(hidden, "hidden_part2.pth")
+        torch.save(t, "t_part2.pth")
+
+        num_blocks = len(self.transformer_blocks)
+        assert self.part_idx > 0
+        num_part1 = round(num_blocks/self.part_num) * self.part_idx
+        num_part2 = round(num_blocks/self.part_num) * (self.part_idx+1)
+        if self.part_idx == self.part_num-1:
+            num_part2 = num_blocks
+        # hidden = hidden.to(self.device)
+        # t = t.to(self.device)
+        # self.rope = (self.rope[0].to(self.device), self.rope[1].to(self.device))
+        # self.block_diff = self.block_diff.to(self.device)
+        
+
+        block_diff = self._create_block_diff(hidden)
+
+        for block in self.transformer_blocks[num_part1:num_part2]:
+            hidden = block(hidden, t, rope=self.rope, block_diff=block_diff)
+
+        if self.part_idx == self.part_num-1:
+            hidden = self.norm_out(hidden, t)
+            hidden = self.proj_out(hidden)
+
+        return hidden
+
+
+    def forward_part2_onnx(
+        self,
+        hidden, 
+        t,
+    ):
+        print(f"--------run forward_part {self.part_idx+1}/{self.part_num}---------------------------")
+        session = ort.InferenceSession(f"token2wav_dit_part{self.part_idx+1}.onnx", providers=["CPUExecutionProvider"])
+
+        inputs = {"hidden":hidden.cpu().numpy(),  "t":t.cpu().numpy()}
+        out = session.run(["output"], inputs)[0]
+        out = torch.from_numpy(out).to(hidden.device)
+        return out 
+
+    
+    def call_forward_onnx(self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        ):
+        return self.forward_onnx(x, cond, spk, code, time)
+
+    def call_forward_2parts_onnx(self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        ):
+        assert self.part_num > 1
+        hidden, t = self.forward_part1_onnx(x, cond, spk, code, time)
+        for i in range(1, self.part_num):
+            self.part_idx=i
+            hidden = self.forward_part2_onnx(hidden, t)
+
+        return hidden
+
+    def call_forward(
+        self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        drop_audio_cond=False,  # cfg for cond audio
+        drop_code=False,  # cfg for code
+        cfg=True,
+    ):
+        batch = x.shape[0]
+        if time.ndim == 0:
+            time = time.repeat(batch)
+
+        return self.forward(x, cond, spk, code, time, drop_audio_cond, drop_code, cfg)
+
+    def call_forward_2parts(
+        self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        drop_audio_cond=False,  # cfg for cond audio
+        drop_code=False,  # cfg for code
+        cfg=True,
+    ):
+        batch = x.shape[0]
+        if time.ndim == 0:
+            time = time.repeat(batch)
+
+        assert self.part_num > 1
+        hidden,  t = self.forward_part1(x, cond, spk, code, time, drop_audio_cond, drop_code, cfg)
+        for i in range(1, self.part_num):
+            self.part_idx = i
+            hidden = self.forward_part2(hidden, t)
+
+        return hidden
+        
+    @torch.no_grad()
+    def sample(
+        self,
+        cond,
+        ref_mel,
+        code,
+        steps=10,
+        cfg_strength=0.5,
+        sway_sampling_coef=-1.0,
+    ):
+        y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
+        max_duration = code.shape[1] * self.repeats
+        y0 = y_all[:, :max_duration].to(code.device)
+        batch = ref_mel.shape[0]
+        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)
+        assert batch == 1, "only support batch size = 1 currently"
+
+        def fn(t, x):
+            if cfg_strength < 1e-5:
+                pred = self.call_forward(x=x, spk=cond, cond=ref_mel, code=code, time=t, drop_audio_cond=False, drop_code=False)
+                return pred
+
+            out_put = self.call_forward(x=x, code=code, spk=cond, cond=ref_mel, time=t, cfg=True)
+            pred, null_pred = torch.chunk(out_put, 2, dim=0)
+
+            return pred + (pred - null_pred) * cfg_strength
+
+        t_start = 0
+        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
+        if sway_sampling_coef is not None:
+            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        solver = ODESolverRK4(func=fn, y0=y0)
+        trajectory = solver.integrate(t)
+
+        generated = trajectory[-1]
+        generated_mel_spec = generated.permute(0, 2, 1)
+        return generated_mel_spec
+
+    @torch.no_grad()
+    def sample_2parts(
+        self,
+        cond,
+        ref_mel,
+        code,
+        steps=10,
+        cfg_strength=0.5,
+        sway_sampling_coef=-1.0,
+    ):
+        y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
+        max_duration = code.shape[1] * self.repeats
+        y0 = y_all[:, :max_duration].to(code.device)
+        batch = ref_mel.shape[0]
+        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)
+        assert batch == 1, "only support batch size = 1 currently"
+
+        def fn(t, x):
+            if cfg_strength < 1e-5:
+                pred = self.call_forward_2parts(x=x, spk=cond, cond=ref_mel, code=code, time=t, drop_audio_cond=False, drop_code=False)
+                return pred
+
+            out_put = self.call_forward_2parts(x=x, code=code, spk=cond, cond=ref_mel, time=t, cfg=True)
+            pred, null_pred = torch.chunk(out_put, 2, dim=0)
+
+            return pred + (pred - null_pred) * cfg_strength
+
+        t_start = 0
+        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
+        if sway_sampling_coef is not None:
+            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        solver = ODESolverRK4(func=fn, y0=y0)
+        trajectory = solver.integrate(t)
+
+        generated = trajectory[-1]
+        generated_mel_spec = generated.permute(0, 2, 1)
+        return generated_mel_spec
 
     @torch.no_grad()
     def sample_onnx(
@@ -105,10 +723,49 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
 
         def fn(t, x):
             if cfg_strength < 1e-5:
-                pred = self.forward_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
+                pred = self.call_forward_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
                 return pred
 
-            out_put = self.forward_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
+            out_put = self.call_forward_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
+            pred, null_pred = torch.chunk(out_put, 2, dim=0)
+
+            return pred + (pred - null_pred) * cfg_strength
+
+        t_start = 0
+        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
+        if sway_sampling_coef is not None:
+            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        solver = ODESolverRK4(func=fn, y0=y0)
+        trajectory = solver.integrate(t)
+
+        generated = trajectory[-1]
+        generated_mel_spec = generated.permute(0, 2, 1)
+        return generated_mel_spec
+
+    @torch.no_grad()
+    def sample_onnx_2parts(
+        self,
+        cond,
+        ref_mel,
+        code,
+        steps=10,
+        cfg_strength=0.5,
+        sway_sampling_coef=-1.0,
+    ):
+        y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
+        max_duration = code.shape[1] * self.repeats
+        y0 = y_all[:, :max_duration].to(code.device)
+        batch = ref_mel.shape[0]
+        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)
+        assert batch == 1, "only support batch size = 1 currently"
+
+        def fn(t, x):
+            if cfg_strength < 1e-5:
+                pred = self.call_forward_2parts_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
+                return pred
+
+            out_put = self.call_forward_2parts_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
             pred, null_pred = torch.chunk(out_put, 2, dim=0)
 
             return pred + (pred - null_pred) * cfg_strength
@@ -152,9 +809,15 @@ class UpSample1d_Export(nn.Module):
         self.conv_transpose.weight.data.copy_(filter.expand(in_channels, -1, -1))
         self.conv_transpose.weight.requires_grad = False  # 冻结权重，使其不可训练
 
+        # 使用 ConstantPad1d 替代 F.pad
+        self.constant_pad = nn.ConstantPad1d((self.pad, self.pad), value=0)  # 填充值为 0
+
     def forward(self, x):
         # 对输入进行填充
-        x = F.pad(x, (self.pad, self.pad), mode="replicate")
+        # print("UpSample1d_Export before pad x.shape", x.shape, "self.pad",self.pad)
+        # x = F.pad(x, (self.pad, self.pad), mode="replicate")
+        x = self.constant_pad(x)
+        # print("UpSample1d_Export after pad x.shape", x.shape)
 
         # 使用 nn.ConvTranspose1d 进行转置卷积操作
         x = self.ratio * self.conv_transpose(x)
@@ -203,21 +866,16 @@ class DownSample1d_Export(nn.Module):
         # self.conv.weight.data.copy_(filter)
         # self.conv.weight.requires_grad = False  # 冻结权重，使其不可训练
 
-               
-
-    # def forward(self, x):
-    #     _, C, _ = x.shape
-    #     # print("self.filter.expand(C, -1, -1)", self.filter.expand(C, -1, -1).shape)
-    #     x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
-    #     out = F.conv1d(x, self.filter.expand(C, -1, -1), stride=self.stride, groups=C)
-
-    #     return out
+        # 使用 ConstantPad1d 替代 F.pad
+        self.constant_pad = nn.ConstantPad1d((self.pad_left, self.pad_right), value=0)  # 填充值为 0
 
     def forward(self, x):
         # assert torch.allclose(self.filter, self.conv.weight.data) 
         # 对输入进行填充
-        x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
-
+        # print("DownSample1d_Export before pad x.shape", x.shape, "self.pad_left",self.pad_left, "self.pad_right",self.pad_right)
+        # x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
+        x = self.constant_pad(x)
+        # print("DownSample1d_Export after pad x.shape", x.shape)
         # 使用 nn.Conv1d 进行卷积操作
         out = self.conv(x)
 

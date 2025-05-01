@@ -34,9 +34,9 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
     model_simp, check = onnxsim.simplify(onnx_model)
     assert check, "Simplified ONNX model could not be validated"
     onnx.save(model_simp, onnx_output,
-                save_as_external_data=True,
-                all_tensors_to_one_file=True,
-                location=onnx_output+".data"
+                # save_as_external_data=True,
+                # all_tensors_to_one_file=True,
+                # location=onnx_output+".data"
                 )
     print("onnx simpilfy successed, and model saved in {}".format(onnx_output))
    
@@ -45,6 +45,7 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
 
 device = torch.device("cuda:5")
 model_path = "Qwen/Qwen2.5-Omni-7B"
+
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,
@@ -53,7 +54,10 @@ model = Qwen2_5OmniModel_Export.from_pretrained(
 
 
 model = model.token2wav.code2wav_dit_model
+model.part_num = 8
 
+# export part1
+model.forward = model.forward_part1
 
 x = torch.load("x.pth").to(model.device)
 cond = torch.load("cond.pth").to(model.device)
@@ -62,4 +66,46 @@ code = torch.load("code.pth").to(model.device)
 time = torch.load("time.pth").to(model.device)
 input = (x, cond, spk, code, time)
 input_names=["x", "cond", "spk", "code", "time"]
-export_onnx(model, input, input_names=input_names, output_names=["output"], onnx_output="token2wav_dit.onnx")
+export_onnx(model, input, input_names=input_names, output_names=["hidden", "t"], onnx_output="token2wav_dit_part1.onnx")
+
+for i in range(1, model.part_num):
+
+    model.forward = model.forward_part2
+    model.part_idx = i
+
+    hidden = torch.load("hidden_part2.pth").to(model.device)
+    t = torch.load("t_part2.pth").to(model.device)
+
+    input = (hidden, t)
+    input_names = ["hidden", "t"]
+    export_onnx(model, input, input_names=input_names, output_names=["output"], onnx_output=f"token2wav_dit_part{i+1}.onnx")
+
+# # export part2
+# model.forward = model.forward_part2
+
+# hidden = torch.load("hidden_part2.pth").to(model.device)
+# t = torch.load("t_part2.pth").to(model.device)
+
+# input = (hidden, t)
+# input_names = ["hidden", "t"]
+# export_onnx(model, input, input_names=input_names, output_names=["output"], onnx_output="token2wav_dit_part2.onnx")
+
+
+# # export part3
+# model.forward = model.forward_part3
+# hidden = torch.load("hidden_part2.pth").to(model.device)
+# t = torch.load("t_part2.pth").to(model.device)
+
+# input = (hidden, t)
+# input_names = ["hidden", "t"]
+# export_onnx(model, input, input_names=input_names, output_names=["output"], onnx_output="token2wav_dit_part3.onnx")
+
+
+# # export part4
+# model.forward = model.forward_part4
+# hidden = torch.load("hidden_part2.pth").to(model.device)
+# t = torch.load("t_part2.pth").to(model.device)
+
+# input = (hidden, t)
+# input_names = ["hidden", "t"]
+# export_onnx(model, input, input_names=input_names, output_names=["output"], onnx_output="token2wav_dit_part4.onnx")

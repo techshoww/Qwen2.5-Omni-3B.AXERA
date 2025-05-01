@@ -3,28 +3,17 @@
   "npu_mode": "NPU3",
   "quant": {
     "input_configs": [
+      
       {
-        "tensor_name": "padded_feature",
-        "calibration_dataset": "calib_audio//padded_feature.tar",
-        "calibration_size": 25,
-        "calibration_format":"Numpy"
-      },
-      {
-        "tensor_name": "padded_mask",
-        "calibration_dataset": "calib_audio//padded_mask.tar",
-        "calibration_size": 25,
-        "calibration_format":"Numpy"
-      },
-      {
-        "tensor_name": "attention_mask",
-        "calibration_dataset": "calib_audio//attention_mask.tar",
+        "tensor_name": "apm_mel",
+        "calibration_dataset": "calib_token2wav//apm_mel.tar",
         "calibration_size": 25,
         "calibration_format":"Numpy"
       }
     ],
     "calibration_method": "MinMax",
     "precision_analysis": true,
-    "precision_analysis_method": "EndToEnd",
+    "precision_analysis_method": "PerLayer",
     "conv_bias_data_type": "FP32",
     "enable_smooth_quant": true,
 	  "disable_auto_refine_scale": true,

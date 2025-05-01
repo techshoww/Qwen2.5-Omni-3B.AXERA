@@ -63,7 +63,7 @@ def inference(video_path):
     return text,audio
 
 
-device = torch.device("cuda:7")
+device = torch.device("cuda:5")
 model_path = "Qwen/Qwen2.5-Omni-7B"
 model = Qwen2_5OmniModel.from_pretrained(
     model_path,

@@ -11,7 +11,7 @@ import numpy as np
 
 device = torch.device("cuda")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniModel_Infer.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype=torch.float32, device_map=device)
+model = Qwen2_5OmniModel_Infer.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype=torch.bfloat16, device_map=device)
 model.thinker.visual.forward = model.thinker.visual.forward_by_second_nchw
 
 # We recommend enabling flash_attention_2 for better acceleration and memory saving.

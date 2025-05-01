@@ -4,27 +4,39 @@
   "quant": {
     "input_configs": [
       {
-        "tensor_name": "padded_feature",
-        "calibration_dataset": "calib_audio//padded_feature.tar",
+        "tensor_name": "x",
+        "calibration_dataset": "calib_token2wav//x.tar",
         "calibration_size": 25,
         "calibration_format":"Numpy"
       },
       {
-        "tensor_name": "padded_mask",
-        "calibration_dataset": "calib_audio//padded_mask.tar",
+        "tensor_name": "cond",
+        "calibration_dataset": "calib_token2wav//cond.tar",
         "calibration_size": 25,
         "calibration_format":"Numpy"
       },
       {
-        "tensor_name": "attention_mask",
-        "calibration_dataset": "calib_audio//attention_mask.tar",
+        "tensor_name": "spk",
+        "calibration_dataset": "calib_token2wav//spk.tar",
+        "calibration_size": 25,
+        "calibration_format":"Numpy"
+      },
+      {
+        "tensor_name": "code",
+        "calibration_dataset": "calib_token2wav//code.tar",
+        "calibration_size": 25,
+        "calibration_format":"Numpy"
+      },
+      {
+        "tensor_name": "time",
+        "calibration_dataset": "calib_token2wav//time.tar",
         "calibration_size": 25,
         "calibration_format":"Numpy"
       }
     ],
     "calibration_method": "MinMax",
     "precision_analysis": true,
-    "precision_analysis_method": "EndToEnd",
+    "precision_analysis_method": "PerLayer",
     "conv_bias_data_type": "FP32",
     "enable_smooth_quant": true,
 	  "disable_auto_refine_scale": true,

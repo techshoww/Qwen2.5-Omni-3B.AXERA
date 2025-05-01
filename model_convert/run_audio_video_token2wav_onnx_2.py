@@ -7,7 +7,6 @@ import audioread
 import soundfile as sf
 from preprocess import Qwen2VLImageProcessorExport
 from transformers.image_utils import PILImageResampling
-import numpy as np
 # @title inference function
 def inference(video_path):
     messages = [
@@ -24,8 +23,6 @@ def inference(video_path):
     inputs = inputs.to(model.device).to(model.dtype)
     print("videos",videos[0].shape)
     print('pixel_values_videos', inputs['pixel_values_videos'].shape)
-    np.save("input_ids_0428.npy", inputs['input_ids'].cpu().numpy())
-    np.save("pixel_values_videos_0428.npy",  inputs["pixel_values_videos"].float().view(2,484,3,392).permute(0,2,1,3).cpu().numpy())
     # inputs["pixel_values_videos"] = inputs["pixel_values_videos"].view(2,484,3,392).permute(0,2,1,3)
 
     img_processor = Qwen2VLImageProcessorExport(max_pixels=308*308, patch_size=14, temporal_patch_size=2, merge_size=2)
@@ -66,7 +63,7 @@ def inference(video_path):
     return text,audio
 
 
-device = torch.device("cuda:5")
+device = torch.device("cuda:7")
 model_path = "Qwen/Qwen2.5-Omni-7B"
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
@@ -76,8 +73,9 @@ model = Qwen2_5OmniModel_Export.from_pretrained(
 model.init_upsampler_downsampler()
 model.thinker.audio_tower.forward = model.thinker.audio_tower.forward_onnx
 model.thinker.visual.forward = model.thinker.visual.forward_onnx_by_second_nchw
-# model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx
-# print("model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data",model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data.shape)
+model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx_2parts
+model.token2wav.code2wav_dit_model.part_num = 8
+model.token2wav.code2wav_bigvgan_model.forward = model.token2wav.code2wav_bigvgan_model.forward_onnx
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 
 
@@ -88,7 +86,7 @@ video_path = "2.mp4"
 response, audio  = inference(video_path)
 print(response[0])
 sf.write(
-    "output.wav",
+    "output_onnx.wav",
     audio.reshape(-1).detach().cpu().numpy(),
     samplerate=24000,
 )

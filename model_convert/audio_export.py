@@ -67,8 +67,9 @@ class Qwen2_5OmniAudioAttention_Export(Qwen2_5OmniAudioAttention):
         query_states = query_states.transpose(0, 1)
         key_states = key_states.transpose(0, 1)
         value_states = value_states.transpose(0, 1)
-        attn_weights = torch.matmul(query_states, key_states.transpose(1, 2)) / math.sqrt(self.head_dim)
-
+        
+        attn_weights = torch.matmul(query_states, key_states.transpose(1, 2)) / math.sqrt(self.head_dim)   # PTQ量化 MSE 较大
+        print("attn_weights 72",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
         # attention_mask = torch.full(
         #     [1, seq_length, key_states.shape[1]],
         #     torch.finfo(query_states.dtype).min,
@@ -79,9 +80,10 @@ class Qwen2_5OmniAudioAttention_Export(Qwen2_5OmniAudioAttention):
         #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
 
         attn_weights = attn_weights + attention_mask
-
+        print("attn_weights 83",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1).to(query_states.dtype)
-
+        print("attn_weights 85",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
+        print("attn_weights",attn_weights)
         if layer_head_mask is not None:
             if layer_head_mask.size() != (self.num_heads,):
                 raise ValueError(
@@ -325,9 +327,9 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         dir_calib_audio = "calib_audio"
         os.makedirs(dir_calib_audio, exist_ok=True)
         time_str = str(time.time())
-        np.save(f"{dir_calib_audio}/padded_feature_{time_str}.npy", padded_feature.cpu().numpy())
-        np.save(f"{dir_calib_audio}/padded_mask_{time_str}.npy", padded_mask.cpu().numpy())
-        np.save(f"{dir_calib_audio}/attention_mask_{time_str}.npy", attention_mask.cpu().numpy())
+        np.save(f"{dir_calib_audio}/padded_feature_{time_str}.npy", padded_feature.float().cpu().numpy())
+        np.save(f"{dir_calib_audio}/padded_mask_{time_str}.npy", padded_mask.float().cpu().numpy())
+        np.save(f"{dir_calib_audio}/attention_mask_{time_str}.npy", attention_mask.float().cpu().numpy())
 
         padded_embed = nn.functional.gelu(self.conv1(padded_feature)) * padded_mask
         padded_embed = nn.functional.gelu(self.conv2(padded_embed)).transpose(1, 2)
