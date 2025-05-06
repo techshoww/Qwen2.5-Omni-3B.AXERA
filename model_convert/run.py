@@ -1,13 +1,15 @@
 import soundfile as sf
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from qwen_omni_utils import process_mm_info
 from glob import glob 
 from PIL import Image
 
+ckpt_dir="../../Qwen2.5-Omni-3B"
+
 device= torch.device("cuda:0")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniModel.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="auto", device_map=device)
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained(ckpt_dir, torch_dtype="auto", device_map=device)
 
 # We recommend enabling flash_attention_2 for better acceleration and memory saving.
 # model = Qwen2_5OmniModel.from_pretrained(
@@ -17,13 +19,15 @@ model = Qwen2_5OmniModel.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="au
 #     attn_implementation="flash_attention_2",
 # )
 
-processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+processor = Qwen2_5OmniProcessor.from_pretrained(ckpt_dir)
 # paths = sorted(glob("demo_cv308/*.jpg"))
 # images = [Image.open(p) for p in paths]
 conversation = [
     {
         "role": "system",
-        "content": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.",
+        "content": [
+            {"type":"text", "text":"You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+        ],
     },
     {
         "role": "user",
