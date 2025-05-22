@@ -10,7 +10,7 @@ from onnx import helper
 from io import BytesIO
 from urllib.request import urlopen
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from modeling_export import Qwen2_5OmniModel_Export
 # @title inference function
 def export_onnx(model, input, input_names, output_names, onnx_output):
@@ -43,18 +43,18 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
     # os.system(f"onnxslim {onnx_output} {onnx_output} ")
     # [libprotobuf ERROR /tmp/pip-install-g8oov4oc/onnxsim_7f61fd2e2c6d42a2abf5f2968fd227a6/third_party/onnx-optimizer/third_party/protobuf/src/google/protobuf/message_lite.cc:449] onnx.ModelProto exceeded maximum protobuf size of 2GB: 2878887489
 
-device = torch.device("cuda:5")
-model_path = "Qwen/Qwen2.5-Omni-7B"
+device = torch.device("cpu")
+model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
 
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.float32,
     device_map=device,
 )
 
 
 model = model.token2wav.code2wav_dit_model
-model.part_num = 8
+model.part_num = 4
 
 # export part1
 model.forward = model.forward_part1

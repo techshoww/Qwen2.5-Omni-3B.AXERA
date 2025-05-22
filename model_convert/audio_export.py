@@ -11,8 +11,8 @@ import onnxruntime as ort
 from itertools import accumulate
 import onnxruntime as ort
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniModel, Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniVisionEncoder, Qwen2_5OmniThinkerConfig,\
-Qwen2_5OmniVisionBlock,Qwen2_5OmniVisionSdpaAttention, apply_rotary_pos_emb_vision, Qwen2_5OmniAudioEncoder, Qwen2_5OmniAudioAttention, Qwen2_5OmniAudioEncoderLayer,Qwen2_5OmniAudioEncoderConfig
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniVisionEncoder, Qwen2_5OmniThinkerConfig,\
+Qwen2_5OmniVisionBlock,Qwen2_5OmniVisionSdpaAttention, apply_rotary_pos_emb_vision, Qwen2_5OmniAudioEncoder, Qwen2_5OmniAudioAttention, Qwen2_5OmniAudioSdpaAttention, Qwen2_5OmniAudioEncoderLayer,Qwen2_5OmniAudioEncoderConfig
 
 
 class Qwen2_5OmniAudioAttention_Export(Qwen2_5OmniAudioAttention):
@@ -78,12 +78,12 @@ class Qwen2_5OmniAudioAttention_Export(Qwen2_5OmniAudioAttention):
         # )
         # for i in range(1, len(cu_seqlens)):
         #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
-
+        print("attention_mask 81", attention_mask.min().item(), attention_mask.max().item(), attention_mask.mean().item(), attention_mask.std().item())
         attn_weights = attn_weights + attention_mask
         print("attn_weights 83",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
         attn_weights = nn.functional.softmax(attn_weights, dim=-1).to(query_states.dtype)
-        print("attn_weights 85",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
-        print("attn_weights",attn_weights)
+        # print("attn_weights 85",attn_weights.min().item(), attn_weights.max().item(), attn_weights.mean().item(), attn_weights.std().item())
+        # print("attn_weights",attn_weights)
         if layer_head_mask is not None:
             if layer_head_mask.size() != (self.num_heads,):
                 raise ValueError(
@@ -101,17 +101,60 @@ class Qwen2_5OmniAudioAttention_Export(Qwen2_5OmniAudioAttention):
 
         return attn_output, attn_weights, past_key_value
 
+class Qwen2_5OmniAudioSdpaAttention_Export(Qwen2_5OmniAudioSdpaAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+
+        seq_length, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+        key_states = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+        value_states = self.v_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+
+        # attention_mask = torch.zeros(
+        #     [1, seq_length, key_states.shape[0]], device=query_states.device, dtype=torch.bool
+        # )
+        # for i in range(1, len(cu_seqlens)):
+        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
+
+        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+        # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
+        query_states = query_states.transpose(0, 1)
+        key_states = key_states.transpose(0, 1)
+        value_states = value_states.transpose(0, 1)
+
+        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
+        # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        attn_output = attn_output.transpose(0, 1)
+        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # partitioned across GPUs when using tensor-parallelism.
+        attn_output = attn_output.reshape(seq_length, self.embed_dim)
+        attn_output = self.out_proj(attn_output)
+        return attn_output
 
 class Qwen2_5OmniAudioEncoderLayer_Export(Qwen2_5OmniAudioEncoderLayer):
     def __init__(self, config: Qwen2_5OmniAudioEncoderConfig):
         super().__init__(config)
 
-        self.self_attn = Qwen2_5OmniAudioAttention_Export(
-            embed_dim=self.embed_dim,
-            num_heads=config.encoder_attention_heads,
-            dropout=config.attention_dropout,
-            config=config,
-        )
+        # self.self_attn = Qwen2_5OmniAudioAttention_Export(
+        #     embed_dim=self.embed_dim,
+        #     num_heads=config.encoder_attention_heads,
+        #     dropout=config.attention_dropout,
+        #     config=config,
+        # )
+        self.self_attn = Qwen2_5OmniAudioSdpaAttention_Export(config)
 
     def forward(
         self,
@@ -133,11 +176,18 @@ class Qwen2_5OmniAudioEncoderLayer_Export(Qwen2_5OmniAudioEncoderLayer):
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights, _ = self.self_attn(
+        # hidden_states, attn_weights, _ = self.self_attn(
+        #     hidden_states=hidden_states,
+        #     attention_mask=attention_mask,
+        #     layer_head_mask=layer_head_mask,
+        #     output_attentions=output_attentions,
+        # )
+
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            layer_head_mask=layer_head_mask,
-            output_attentions=output_attentions,
+            # layer_head_mask=layer_head_mask,
+            # output_attentions=output_attentions,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -155,8 +205,8 @@ class Qwen2_5OmniAudioEncoderLayer_Export(Qwen2_5OmniAudioEncoderLayer):
 
         outputs = (hidden_states,)
 
-        if output_attentions:
-            outputs += (attn_weights,)
+        # if output_attentions:
+        #     outputs += (attn_weights,)
 
         return outputs
 
@@ -244,14 +294,20 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         ).to(torch.int32)
 
         seq_length = hidden_states.shape[0]
-        attention_mask = torch.full(
-            [1, seq_length, seq_length],
-            -3.3895313892515355e+38,
-            device=padded_feature.device,
-            dtype=padded_feature.dtype,
+        # attention_mask = torch.full(
+        #     [1, seq_length, seq_length],
+        #     -3.3895313892515355e+38,
+        #     device=padded_feature.device,
+        #     dtype=padded_feature.dtype,
+        # )
+        # for i in range(1, len(cu_seqlens)):
+        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=padded_feature.device, dtype=torch.float32
         )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 1
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -327,9 +383,10 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         dir_calib_audio = "calib_audio"
         os.makedirs(dir_calib_audio, exist_ok=True)
         time_str = str(time.time())
-        np.save(f"{dir_calib_audio}/padded_feature_{time_str}.npy", padded_feature.float().cpu().numpy())
-        np.save(f"{dir_calib_audio}/padded_mask_{time_str}.npy", padded_mask.float().cpu().numpy())
-        np.save(f"{dir_calib_audio}/attention_mask_{time_str}.npy", attention_mask.float().cpu().numpy())
+        np.save(f"{dir_calib_audio}/padded_feature_{time_str}.npy", padded_feature.cpu().numpy())
+        np.save(f"{dir_calib_audio}/padded_mask_{time_str}.npy", padded_mask.cpu().numpy())
+        np.save(f"{dir_calib_audio}/attention_mask_{time_str}.npy", attention_mask.cpu().numpy())
+        # print("attention_mask 334", attention_mask.min().item(), attention_mask.max().item(), attention_mask.mean().item(), attention_mask.std().item())
 
         padded_embed = nn.functional.gelu(self.conv1(padded_feature)) * padded_mask
         padded_embed = nn.functional.gelu(self.conv2(padded_embed)).transpose(1, 2)
@@ -462,7 +519,7 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        print("return_dict",return_dict)
+        # print("return_dict",return_dict)
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         chunk_lengths = torch.tensor(
@@ -482,14 +539,11 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         assert head_mask is None
         assert not output_attentions  
         assert not output_hidden_states
-        print("padded_feature.dtype",padded_feature.dtype)
-        print("padded_mask",padded_mask.dtype)
-        print("padded_mask_after_cnn",padded_mask_after_cnn.dtype)
-        print("aftercnn_lens",aftercnn_lens.dtype)
-        # padded_feature = padded_feature.to(torch.float32)
-        # padded_mask = padded_mask.to(torch.int32)
-        # padded_mask_after_cnn = padded_mask_after_cnn.to(torch.bool)
-        # aftercnn_lens = aftercnn_lens.to(torch.int32)
+        # print("padded_feature.dtype",padded_feature.dtype)
+        # print("padded_mask",padded_mask.dtype)
+        # print("padded_mask_after_cnn",padded_mask_after_cnn.dtype)
+        # print("aftercnn_lens",aftercnn_lens.dtype)
+        
         
 
         cu_seqlens = torch.cat(
@@ -499,34 +553,41 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
             )
         ).to(torch.int32)
 
-        print("padded_mask_after_cnn.sum()",padded_mask_after_cnn.sum())
+        # print("padded_mask_after_cnn.sum()",padded_mask_after_cnn.sum())
         # seq_length = padded_mask_after_cnn.sum().item()
         d0,_,d2 =  padded_feature.shape
         padded_len = torch.tensor(d0*d2, dtype=feature_lens.dtype, device=feature_lens.device)
         seq_len, _ = self._get_feat_extract_output_lengths(padded_len)
-        attention_mask = torch.full(
-            [1, seq_len, seq_len],
-            -3.3895313892515355e+38,
-            device=padded_feature.device,
-            dtype=padded_feature.dtype,
+        # attention_mask = torch.full(
+        #     [1, seq_len, seq_len],
+        #     -3.3895313892515355e+38,
+        #     device=padded_feature.device,
+        #     dtype=padded_feature.dtype,
+        # )
+        # for i in range(1, len(cu_seqlens)):
+        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+
+        attention_mask = torch.zeros(
+            [1, seq_len, seq_len], device=padded_feature.device, dtype=torch.float32
         )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 1
 
-        torch.save(attention_mask[:, 0:self.n_window, 0:self.n_window], "attention_mask.pth")
-        torch.save(padded_feature[0:1], "padded_feature.pth")
-        torch.save(padded_mask[0:1], "padded_mask.pth")
-
-
+        # torch.save(attention_mask[:, 0:self.n_window, 0:self.n_window], "attention_mask.pth")
+        # torch.save(padded_feature[0:1], "padded_feature.pth")
+        # torch.save(padded_mask[0:1], "padded_mask.pth")
+        print("padded_mask.dtype",padded_mask.dtype)
+        print("padded_feature",padded_feature.dtype)
+        print("attention_mask",attention_mask.dtype)
         token_audio_list = []
         for di in range(d0):
-            print("padded_feature[di:di+1]",padded_feature[di:di+1].shape)
+            # print("padded_feature[di:di+1]",padded_feature[di:di+1].shape)
 
             token_audio =  self.forward_export(padded_feature[di:di+1], padded_mask[di:di+1],  attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window])        
-            print("token_audio",token_audio.shape)
+            # print("token_audio",token_audio.shape)
             token_audio_list.append(token_audio)
         token_audio = torch.cat(token_audio_list, 0)
-        print("token_audio",token_audio.shape)
+        # print("token_audio",token_audio.shape)
         _, output_lens = self._get_feat_extract_output_lengths(feature_lens)
         output_lens = output_lens.item()
         token_audio = token_audio[0:output_lens]
@@ -611,20 +672,20 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        print("return_dict",return_dict)
+        # print("return_dict",return_dict)
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
-        print("chunk_num",chunk_num)
+        # print("chunk_num",chunk_num)
         chunk_lengths = torch.tensor(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
         )
-        print("chunk_lengths",chunk_lengths)
-        print("feature_lens",feature_lens)
+        # print("chunk_lengths",chunk_lengths)
+        # print("feature_lens",feature_lens)
         tail_chunk_index = list(accumulate(chunk_num.tolist(), func=operator.add, initial=-1))[1:]
         chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
         chunk_lengths = torch.where(chunk_lengths == 0, self.n_window * 2, chunk_lengths)
-        print("chunk_lengths",chunk_lengths)
+        # print("chunk_lengths",chunk_lengths)
 
         chunk_list = input_features.split(chunk_lengths.tolist(), dim=1)
         padded_feature, padded_mask, padded_mask_after_cnn = self.padded_and_mask_function_maxlen(
@@ -634,16 +695,7 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         assert head_mask is None
         assert not output_attentions  
         assert not output_hidden_states
-        print("padded_feature.shape",padded_feature.shape)
-        print("padded_mask",padded_mask.shape)
-        print("padded_mask_after_cnn",padded_mask_after_cnn.shape)
-        print("aftercnn_lens",aftercnn_lens.dtype)
-        # padded_feature = padded_feature.to(torch.float32)
-        # padded_mask = padded_mask.to(torch.int32)
-        # padded_mask_after_cnn = padded_mask_after_cnn.to(torch.bool)
-        # aftercnn_lens = aftercnn_lens.to(torch.int32)
-        
-
+       
         cu_seqlens = torch.cat(
             (
                 torch.zeros(1, device=padded_mask_after_cnn.device, dtype=torch.int32),
@@ -651,23 +703,25 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
             )
         ).to(torch.int32)
 
-        print("padded_mask_after_cnn.sum()",padded_mask_after_cnn.sum())
+        # print("padded_mask_after_cnn.sum()",padded_mask_after_cnn.sum())
         # seq_length = padded_mask_after_cnn.sum().item()
         d0,_,d2 =  padded_feature.shape
         padded_len = torch.tensor(d0*d2, dtype=feature_lens.dtype, device=feature_lens.device)
         seq_len, _ = self._get_feat_extract_output_lengths(padded_len)
-        attention_mask = torch.full(
-            [1, seq_len, seq_len],
-            -3.3895313892515355e+38,
-            device=padded_feature.device,
-            dtype=padded_feature.dtype,
+        # attention_mask = torch.full(
+        #     [1, seq_len, seq_len],
+        #     -3.3895313892515355e+38,
+        #     device=padded_feature.device,
+        #     dtype=padded_feature.dtype,
+        # )
+        # for i in range(1, len(cu_seqlens)):
+        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
+
+        attention_mask = torch.zeros(
+            [1, seq_len, seq_len], device=padded_feature.device, dtype=torch.float32
         )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
-
-        torch.save(attention_mask[:, 0:self.n_window, 0:self.n_window], "attention_mask.pth")
-        torch.save(padded_feature[0:1], "padded_feature.pth")
-        torch.save(padded_mask[0:1], "padded_mask.pth")
+            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 1
 
         print("test audio tower Onnx -------------------")
         session = ort.InferenceSession("audio_tower.onnx", providers=["CPUExecutionProvider"])
@@ -675,9 +729,9 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         
         token_audio_list = []
         for di in range(d0):
-            print("padded_feature[di:di+1]",padded_feature[di:di+1].shape)
-            print("padded_mask[di:di+1]",padded_mask[di:di+1].shape)
-            print("attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window]",attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window].shape)
+            # print("padded_feature[di:di+1]",padded_feature[di:di+1].shape)
+            # print("padded_mask[di:di+1]",padded_mask[di:di+1].shape)
+            # print("attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window]",attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window].shape)
             # token_audio =  self.forward_export(padded_feature[di:di+1], padded_mask[di:di+1],  attention_mask[:, di*self.n_window:(di+1)*self.n_window, di*self.n_window:(di+1)*self.n_window])        
             inputs = {"padded_feature": padded_feature[di:di+1].to(torch.float32).cpu().numpy(),
                     "padded_mask": padded_mask[di:di+1].to(torch.int64).cpu().numpy(),
@@ -687,7 +741,7 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
 
             token_audio_list.append(token_audio)
         token_audio = torch.cat(token_audio_list, 0)
-        print("token_audio",token_audio.shape)
+        # print("token_audio",token_audio.shape)
         _, output_lens = self._get_feat_extract_output_lengths(feature_lens)
         output_lens = output_lens.item()
         token_audio = token_audio[0:output_lens]
@@ -805,7 +859,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_Export(Qwen2_5OmniThinkerForCon
 
         self.visual = None
 
-class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
+class Qwen2_5OmniModel_Export(Qwen2_5OmniForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
 

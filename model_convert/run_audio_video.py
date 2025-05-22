@@ -1,6 +1,6 @@
 from qwen_omni_utils import process_mm_info
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from modeling_export import Qwen2_5OmniModel_Export
 import librosa
 import audioread
@@ -10,16 +10,23 @@ from transformers.image_utils import PILImageResampling
 # @title inference function
 def inference(video_path):
     messages = [
-        {"role": "system", "content": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."},
-        {"role": "user", "content": [
-                {"type": "video", "video": video_path, "max_pixels": 308 * 308, "min_pixels": 308 * 308},
-            ]
-        },
-    ]
+    {
+        "role": "system",
+        "content": [
+            {"type":"text", "text":"You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+        ],
+    },
+    {
+        "role": "user",
+        "content": [
+            {"type": "video", "video": video_path, "max_pixels": 308 * 308, "min_pixels": 308 * 308, "fps": 1.0,} ,
+        ],
+    },
+]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     # image_inputs, video_inputs = process_vision_info([messages])
     audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-    inputs = processor(text=text, audios=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True)
+    inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True, min_pixels=308*308, max_pixel=308*308)
     inputs = inputs.to(model.device).to(model.dtype)
     print("videos",videos[0].shape)
     print('pixel_values_videos', inputs['pixel_values_videos'].shape)
@@ -63,9 +70,9 @@ def inference(video_path):
     return text,audio
 
 
-device = torch.device("cuda:5")
-model_path = "Qwen/Qwen2.5-Omni-7B"
-model = Qwen2_5OmniModel.from_pretrained(
+device = torch.device("cuda")
+model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,
     device_map=device,
@@ -75,7 +82,7 @@ model = Qwen2_5OmniModel.from_pretrained(
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)
 
 
-video_path = "2.mp4"
+video_path = "2.mp4"    
 # video_path="demo.mp4"
 
 ## Use a local HuggingFace model to inference.
@@ -86,3 +93,5 @@ sf.write(
     audio.reshape(-1).detach().cpu().numpy(),
     samplerate=24000,
 )
+
+# It looks like you're playing the piano. That's really cool! What kind of music are you playing? And do you have any other instruments you like to play?

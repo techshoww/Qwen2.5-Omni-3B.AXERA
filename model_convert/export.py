@@ -46,7 +46,7 @@ def generate_attnmask(seq_length, cu_seqlens, device):
     return attention_mask
 
 # checkpoint_dir = sys.argv[1] if len(sys.argv)>=2 else "../../Qwen/Qwen2.5-VL-3B-Instruct/"
-checkpoint_dir="Qwen/Qwen2.5-Omni-7B"
+checkpoint_dir="/data/lihongjie/Qwen2.5-Omni-3B"
 # which = sys.argv[2] if len(sys.argv)>=3 else "image"
 which = "video"
 
@@ -71,7 +71,7 @@ input = ( hidden_states)
 
 input_names = ["hidden_states"]
 
-onnx_output = f"Qwen2.5-Omni-7B_vision.onnx"
+onnx_output = f"Qwen2.5-Omni-3B_vision.onnx"
 
 output_names = [f"hidden_states_out"]
 

@@ -6,19 +6,19 @@
       {
         "tensor_name": "padded_feature",
         "calibration_dataset": "calib_audio//padded_feature.tar",
-        "calibration_size": 25,
+        "calibration_size": 81,
         "calibration_format":"Numpy"
       },
       {
         "tensor_name": "padded_mask",
         "calibration_dataset": "calib_audio//padded_mask.tar",
-        "calibration_size": 25,
+        "calibration_size": 81,
         "calibration_format":"Numpy"
       },
       {
         "tensor_name": "attention_mask",
         "calibration_dataset": "calib_audio//attention_mask.tar",
-        "calibration_size": 25,
+        "calibration_size": 81,
         "calibration_format":"Numpy"
       }
     ],

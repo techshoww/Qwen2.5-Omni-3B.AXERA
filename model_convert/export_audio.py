@@ -11,7 +11,6 @@ from onnx import helper
 from io import BytesIO
 from urllib.request import urlopen
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
 from audio_export import Qwen2_5OmniModel_Export
 # @title inference function
 def export_onnx(model, input, input_names, output_names, onnx_output):
@@ -45,7 +44,7 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
 
 
 device = torch.device("cpu")
-model_path = "Qwen/Qwen2.5-Omni-7B"
+model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.float32,

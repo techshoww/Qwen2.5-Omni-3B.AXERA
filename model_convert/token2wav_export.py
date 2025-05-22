@@ -3,12 +3,13 @@ import math
 import onnxruntime as ort 
 import torch 
 import torch.nn as nn
+from torch.nn import Parameter
 import torch.nn.functional as F
-from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniToken2WavDiTModel, ODESolverRK4, \
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniToken2WavDiTModel, RungeKutta4ODESolver, \
             Qwen2_5OmniToken2WavModel, Qwen2_5OmniToken2WavConfig, Qwen2_5OmniToken2WavBigVGANModel, Qwen2_5OmniBigVGANConfig, \
                 TorchActivation1d, SnakeBeta, kaiser_sinc_filter1d, AMPBlock, DownSample1d, Qwen2_5OmniDiTConfig,\
-                    DiTAttention, apply_rotary_pos_emb, DiTBlock, Res2NetBlock, SERes2NetBlock, ECAPA_TDNN, AttentiveStatisticsPooling,\
-                        InputEmbedding
+                    DiTAttention, apply_rotary_pos_emb,  Res2NetBlock, SqueezeExcitationRes2NetBlock, ECAPA_TimeDelayNet, AttentiveStatisticsPooling,\
+                        DiTInputEmbedding
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -35,19 +36,36 @@ def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.
     attn_weight = torch.dropout(attn_weight, dropout_p, train=False)
     return attn_weight @ value
 
-class DiTAttention_Export(DiTAttention):
+class DiTAttention_Export(nn.Module):
+    def __init__(self, config: Qwen2_5OmniDiTConfig):
+        super().__init__()
+
+        self.config = config
+        self.dim = config.hidden_size
+        self.heads = config.num_attention_heads
+        self.inner_dim = config.head_dim * config.num_attention_heads
+        self.dropout = config.dropout
+        self._attn_implementation = config._attn_implementation
+        self.is_causal = False
+
+        self.to_q = nn.Linear(config.hidden_size, self.inner_dim)
+        self.to_k = nn.Linear(config.hidden_size, self.inner_dim)
+        self.to_v = nn.Linear(config.hidden_size, self.inner_dim)
+
+        self.to_out = nn.ModuleList([nn.Linear(self.inner_dim, config.hidden_size), nn.Dropout(config.dropout)])
+
     def forward(
         self,
-        x,  # noised input x
-        rope=None,  # rotary position embedding for x
-        mask=None,
+        hidden_states,  # noised input x
+        position_embeddings=None,  # rotary position embedding for x
+        attention_mask=None,
     ) -> torch.Tensor:
-        batch_size = x.shape[0]
+        batch_size = hidden_states.shape[0]
 
         # `sample` projections.
-        query = self.to_q(x)
-        key = self.to_k(x)
-        value = self.to_v(x)
+        query = self.to_q(hidden_states)
+        key = self.to_k(hidden_states)
+        value = self.to_v(hidden_states)
 
         # attention
         inner_dim = key.shape[-1]
@@ -58,37 +76,37 @@ class DiTAttention_Export(DiTAttention):
 
         # apply rotary position embedding
         # Due to training process, only first head is applied with RoPE, will be fixed at next release
-        cos, sin = rope
-        query[:, :1], key[:, :1] = apply_rotary_pos_emb(query[:, :1], key[:, :1], cos, sin)
+        cos, sin = position_embeddings
+        
+        # query[:, :1], key[:, :1] = apply_rotary_pos_emb(query[:, :1], key[:, :1], cos, sin)
+
+        query_p1, query_p2 = torch.split(query, split_size_or_sections=[1, query.shape[1]-1], dim=1)
+        key_p1, key_p2 = torch.split(key, split_size_or_sections=[1, key.shape[1]-1], dim=1)
+        query_p1, key_p1 = apply_rotary_pos_emb(query_p1, key_p1, cos, sin)
+
+        query = torch.cat([query_p1,query_p2], 1)
+        key = torch.cat([key_p1, key_p2], 1)
 
         # attention_interface = ALL_ATTENTION_FUNCTIONS[self._attn_implementation]
-        # x, _ = attention_interface(
-        #     self,
-        #     query,
-        #     key,
-        #     value,
-        #     attention_mask=mask,
-        #     is_causal=False,
-        # )
+        attention_weights, _ = sdpa_attention_forward(
+            self,
+            query,
+            key,
+            value,
+            attention_mask=attention_mask,
+            is_causal=False,
+        )
 
         # mask. e.g. inference got a batch with different target durations, mask out the padding
-        # x = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
-
-        x = scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
-        x = x.reshape(batch_size, -1, self.heads * head_dim)
-        x = x.to(query.dtype)
+        attention_weights = attention_weights.reshape(batch_size, -1, self.heads * head_dim)
+        attention_weights = attention_weights.to(query.dtype)
 
         # linear proj
-        x = self.to_out[0](x)
-        # dropout
-        x = self.to_out[1](x)
+        attention_output = self.to_out[0](attention_weights)
+        attention_output = self.to_out[1](attention_output)
 
-        return x
+        return attention_output
 
-class DiTBlock_Export(DiTBlock):
-    def __init__(self, config: Qwen2_5OmniDiTConfig, look_ahead_block=0, look_backward_block=0):
-        super().__init__(config, look_ahead_block, look_backward_block)
-        self.attn = DiTAttention_Export(config)
 
 
 def calculate_same_padding(kernel_size, dilation):
@@ -209,7 +227,7 @@ class AttentiveStatisticsPooling_Export(AttentiveStatisticsPooling):
             # padding_mode="reflect",
         )
 
-class SERes2NetBlock_Export(SERes2NetBlock):
+class SERes2NetBlock_Export(SqueezeExcitationRes2NetBlock):
     """An implementation of building block in ECAPA-TDNN, i.e.,
     TDNN-Res2Net-TDNN-SEBlock.
 
@@ -253,7 +271,7 @@ class SERes2NetBlock_Export(SERes2NetBlock):
         )
         self.se_block = SEBlock_Export(out_channels, se_channels, out_channels)
 
-class ECAPA_TDNN_Export(ECAPA_TDNN):
+class ECAPA_TDNN_Export(ECAPA_TimeDelayNet):
     """An implementation of the speaker embedding model in a paper.
     "ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation in
     TDNN Based Speaker Verification" (https://arxiv.org/abs/2005.07143).
@@ -326,7 +344,7 @@ class ECAPA_TDNN_Export(ECAPA_TDNN):
             # padding_mode="reflect",
         )
 
-class InputEmbedding_Export(InputEmbedding):
+class InputEmbedding_Export(DiTInputEmbedding):
     def __init__(self, config: Qwen2_5OmniDiTConfig):
         super().__init__(config)
         
@@ -340,15 +358,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
 
         self.part_num = 1
         self.part_idx = 0
-        # self.transformer_blocks = nn.ModuleList()
-        # for i in range(config.num_hidden_layers):
-        #     self.transformer_blocks.append(
-        #         DiTBlock_Export(
-        #             config,
-        #             look_ahead_block=1 if i in config.look_ahead_layers else 0,
-        #             look_backward_block=1 if i in config.look_backward_layers else 0,
-        #         )
-        #     )
+        
 
 
         # if os.path.exists("block_diff.pth"):
@@ -387,9 +397,9 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         spk,  # spk embedding
         code,  # code
         time,  # time step  # noqa: F821 F722
-        drop_audio_cond=False,  # cfg for cond audio
+        drop_audio_conditioning=False,  # cfg for cond audio
         drop_code=False,  # cfg for code
-        cfg=True,
+        apply_cfg=True,
     ):
         print("-----------------------------------")
         print("x",x.shape)
@@ -405,16 +415,16 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         
         # t: conditioning time, c: context (code + masked cond audio), x: noised input audio
         t = self.time_embed(time)
-        code_embed = self.text_embed(code, drop_code=False if cfg else drop_code)
-        code_embed_uncond = self.text_embed(code, drop_code=True) if cfg else None
+        code_embed = self.text_embed(code, drop_code=False if apply_cfg else drop_code)
+        code_embed_uncond = self.text_embed(code, drop_code=True) if apply_cfg else None
         hidden = self.input_embed(
             x,
             spk,
             cond,
             code_embed,
-            drop_audio_cond=drop_audio_cond,
+            drop_audio_cond=drop_audio_conditioning,
             code_embed_uncond=code_embed_uncond,
-            cfg=cfg,
+            apply_cfg=apply_cfg,
         )
 
         # rope = self.rotary_embed(x, torch.arange(seq_len, device=x.device).repeat(batch, 1))
@@ -428,7 +438,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         #     torch.save(block_diff, "block_diff.pth")
         block_diff = self._create_block_diff(hidden)
         for block in self.transformer_blocks:
-            hidden = block(hidden, t, rope=rope, block_diff=block_diff)
+            hidden = block(hidden, t, position_embeddings=rope, block_diff=block_diff)
 
         hidden = self.norm_out(hidden, t)
         output = self.proj_out(hidden)
@@ -469,7 +479,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
             code_embed,
             drop_audio_cond=drop_audio_cond,
             code_embed_uncond=code_embed_uncond,
-            cfg=cfg,
+            apply_cfg=cfg,
         )
 
         # rope = self.rotary_embed(x, torch.arange(seq_len, device=x.device).repeat(batch, 1))
@@ -483,7 +493,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         num_part1 = round(num_blocks/self.part_num)
         
         for block in self.transformer_blocks[0:num_part1]:
-            hidden = block(hidden, t, rope=rope, block_diff=block_diff)
+            hidden = block(hidden, t, position_embeddings=rope, block_diff=block_diff)
 
         if self.part_num==1:
             hidden = self.norm_out(hidden, t)
@@ -539,7 +549,7 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         block_diff = self._create_block_diff(hidden)
 
         for block in self.transformer_blocks[num_part1:num_part2]:
-            hidden = block(hidden, t, rope=self.rope, block_diff=block_diff)
+            hidden = block(hidden, t, position_embeddings=self.rope, block_diff=block_diff)
 
         if self.part_idx == self.part_num-1:
             hidden = self.norm_out(hidden, t)
@@ -593,15 +603,15 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         spk,  # spk embedding
         code,  # code
         time,  # time step  # noqa: F821 F722
-        drop_audio_cond=False,  # cfg for cond audio
+        drop_audio_conditioning=False,  # cfg for cond audio
         drop_code=False,  # cfg for code
-        cfg=True,
+        apply_cfg=True,
     ):
         batch = x.shape[0]
         if time.ndim == 0:
             time = time.repeat(batch)
 
-        return self.forward(x, cond, spk, code, time, drop_audio_cond, drop_code, cfg)
+        return self.forward(x, cond, spk, code, time, drop_audio_conditioning, drop_code, apply_cfg=apply_cfg)
 
     def call_forward_2parts(
         self,
@@ -632,9 +642,9 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         cond,
         ref_mel,
         code,
-        steps=10,
-        cfg_strength=0.5,
-        sway_sampling_coef=-1.0,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
     ):
         y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
         max_duration = code.shape[1] * self.repeats
@@ -644,21 +654,21 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         assert batch == 1, "only support batch size = 1 currently"
 
         def fn(t, x):
-            if cfg_strength < 1e-5:
-                pred = self.call_forward(x=x, spk=cond, cond=ref_mel, code=code, time=t, drop_audio_cond=False, drop_code=False)
+            if guidance_scale < 1e-5:
+                pred = self.call_forward(x=x, spk=cond, cond=ref_mel, code=code, time=t, drop_audio_conditioning=False, drop_code=False)
                 return pred
 
-            out_put = self.call_forward(x=x, code=code, spk=cond, cond=ref_mel, time=t, cfg=True)
+            out_put = self.call_forward(x=x, code=code, spk=cond, cond=ref_mel, time=t, apply_cfg=True)
             pred, null_pred = torch.chunk(out_put, 2, dim=0)
 
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * guidance_scale
 
         t_start = 0
-        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
-        if sway_sampling_coef is not None:
-            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        t = torch.linspace(t_start, 1, num_steps, device=code.device, dtype=cond.dtype)
+        if sway_coefficient is not None:
+            t = t + sway_coefficient * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        solver = ODESolverRK4(func=fn, y0=y0)
+        solver = RungeKutta4ODESolver(function=fn, initial_value=y0)
         trajectory = solver.integrate(t)
 
         generated = trajectory[-1]
@@ -671,9 +681,9 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         cond,
         ref_mel,
         code,
-        steps=10,
-        cfg_strength=0.5,
-        sway_sampling_coef=-1.0,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
     ):
         y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
         max_duration = code.shape[1] * self.repeats
@@ -683,21 +693,21 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         assert batch == 1, "only support batch size = 1 currently"
 
         def fn(t, x):
-            if cfg_strength < 1e-5:
+            if guidance_scale < 1e-5:
                 pred = self.call_forward_2parts(x=x, spk=cond, cond=ref_mel, code=code, time=t, drop_audio_cond=False, drop_code=False)
                 return pred
 
             out_put = self.call_forward_2parts(x=x, code=code, spk=cond, cond=ref_mel, time=t, cfg=True)
             pred, null_pred = torch.chunk(out_put, 2, dim=0)
 
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * guidance_scale
 
         t_start = 0
-        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
-        if sway_sampling_coef is not None:
-            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        t = torch.linspace(t_start, 1, num_steps, device=code.device, dtype=cond.dtype)
+        if sway_coefficient is not None:
+            t = t + sway_coefficient * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        solver = ODESolverRK4(func=fn, y0=y0)
+        solver = RungeKutta4ODESolver(function=fn, initial_value=y0)
         trajectory = solver.integrate(t)
 
         generated = trajectory[-1]
@@ -710,9 +720,9 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         cond,
         ref_mel,
         code,
-        steps=10,
-        cfg_strength=0.5,
-        sway_sampling_coef=-1.0,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
     ):
         y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
         max_duration = code.shape[1] * self.repeats
@@ -722,21 +732,21 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         assert batch == 1, "only support batch size = 1 currently"
 
         def fn(t, x):
-            if cfg_strength < 1e-5:
+            if guidance_scale < 1e-5:
                 pred = self.call_forward_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
                 return pred
 
             out_put = self.call_forward_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
             pred, null_pred = torch.chunk(out_put, 2, dim=0)
 
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * guidance_scale
 
         t_start = 0
-        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
-        if sway_sampling_coef is not None:
-            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        t = torch.linspace(t_start, 1, num_steps, device=code.device, dtype=cond.dtype)
+        if sway_coefficient is not None:
+            t = t + sway_coefficient * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        solver = ODESolverRK4(func=fn, y0=y0)
+        solver = RungeKutta4ODESolver(function=fn, initial_value=y0)
         trajectory = solver.integrate(t)
 
         generated = trajectory[-1]
@@ -749,9 +759,9 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         cond,
         ref_mel,
         code,
-        steps=10,
-        cfg_strength=0.5,
-        sway_sampling_coef=-1.0,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
     ):
         y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
         max_duration = code.shape[1] * self.repeats
@@ -761,21 +771,21 @@ class Qwen2_5OmniToken2WavDiTModel_Export(Qwen2_5OmniToken2WavDiTModel):
         assert batch == 1, "only support batch size = 1 currently"
 
         def fn(t, x):
-            if cfg_strength < 1e-5:
+            if guidance_scale < 1e-5:
                 pred = self.call_forward_2parts_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
                 return pred
 
             out_put = self.call_forward_2parts_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
             pred, null_pred = torch.chunk(out_put, 2, dim=0)
 
-            return pred + (pred - null_pred) * cfg_strength
+            return pred + (pred - null_pred) * guidance_scale
 
         t_start = 0
-        t = torch.linspace(t_start, 1, steps, device=code.device, dtype=cond.dtype)
-        if sway_sampling_coef is not None:
-            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+        t = torch.linspace(t_start, 1, num_steps, device=code.device, dtype=cond.dtype)
+        if sway_coefficient is not None:
+            t = t + sway_coefficient * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        solver = ODESolverRK4(func=fn, y0=y0)
+        solver = RungeKutta4ODESolver(function=fn, initial_value=y0)
         trajectory = solver.integrate(t)
 
         generated = trajectory[-1]
@@ -896,6 +906,64 @@ class TorchActivation1d_Export(TorchActivation1d):
         self.upsample = UpSample1d_Export(in_channels, up_ratio, up_kernel_size)
         self.downsample = DownSample1d_Export(in_channels, down_ratio, down_kernel_size)
 
+
+class SnakeBeta_Export(nn.Module):
+    """
+    A modified Snake function which uses separate parameters for the magnitude of the periodic components
+    Shape:
+        - Input: (B, C, T)
+        - Output: (B, C, T), same shape as the input
+    Parameters:
+        - alpha - trainable parameter that controls frequency
+        - beta - trainable parameter that controls magnitude
+    References:
+        - This activation function is a modified version based on this paper by Liu Ziyin, Tilman Hartwig, Masahito Ueda:
+        https://arxiv.org/abs/2006.08195
+    """
+
+    def __init__(self, in_features, alpha=1.0):
+        super().__init__()
+        self.in_features = in_features
+
+        # initialize alpha
+        self.alpha = Parameter(torch.zeros(in_features) * alpha)
+        self.beta = Parameter(torch.zeros(in_features) * alpha)
+
+        self.no_div_by_zero = 0.000000001
+
+    def forward(self, hidden_states):
+        if hidden_states.shape[-1]<2**18:
+            return self.do_forward(hidden_states)
+        else:
+            K = hidden_states.shape[-1]
+            y = []
+            for i in range(0,K, 2**16):
+                xi = hidden_states[..., i : i+2**16]
+                yi = self.do_forward(xi)
+                y.append(yi)
+
+            y = torch.cat(y, -1)
+            assert y.shape[-1]==hidden_states.shape[-1], f'y:{y.shape}, hidden_states:{hidden_states.shape}'
+
+            return y
+
+
+    def do_forward(self, hidden_states):
+        """
+        Forward pass of the function.
+        Applies the function to the input elementwise.
+        SnakeBeta ∶= x + 1/b * sin^2 (xa)
+        """
+        alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
+        beta = self.beta.unsqueeze(0).unsqueeze(-1)
+        alpha = torch.exp(alpha)
+        beta = torch.exp(beta)
+        hidden_states = hidden_states + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
+            torch.sin(hidden_states * alpha), 2
+        )
+
+        return hidden_states
+    
 class AMPBlock_Export(AMPBlock):
     def __init__(
         self,
@@ -921,35 +989,57 @@ class Qwen2_5OmniToken2WavBigVGANModel_Export(Qwen2_5OmniToken2WavBigVGANModel):
                 self.resblocks.append(AMPBlock_Export(ch, k, d))
 
         # post conv
+        ch = config.upsample_initial_channel // (2**self.num_upsample_layers)
         self.activation_post = TorchActivation1d_Export(activation=SnakeBeta(ch), in_channels=ch)
 
-    def forward(self, apm_mel):
-        print("Qwen2_5OmniToken2WavBigVGANModel_Export apm_mel.shape",apm_mel.shape)
-        torch.save(apm_mel, "apm_mel.pth")
-        mel_spec = self.apm_to_db(apm_mel)
-        # pre conv
-        hidden = self.conv_pre(mel_spec)
+    # def forward(self, apm_mel):
+    #     print("Qwen2_5OmniToken2WavBigVGANModel_Export apm_mel.shape",apm_mel.shape)
+    #     torch.save(apm_mel, "apm_mel.pth")
+    #     mel_spec = self.apm_to_db(apm_mel)
+    #     # pre conv
+    #     hidden = self.conv_pre(mel_spec)
 
-        for i in range(self.num_upsamples):
-            # upsampling
-            for i_up in range(len(self.ups[i])):
-                hidden = self.ups[i][i_up](hidden)
-            # AMP blocks
-            xs = None
-            for j in range(self.num_kernels):
-                if xs is None:
-                    xs = self.resblocks[i * self.num_kernels + j](hidden)
-                else:
-                    xs += self.resblocks[i * self.num_kernels + j](hidden)
-            hidden = xs / self.num_kernels
+    #     for i in range(self.num_upsamples):
+    #         # upsampling
+    #         for i_up in range(len(self.ups[i])):
+    #             hidden = self.ups[i][i_up](hidden)
+    #         # AMP blocks
+    #         xs = None
+    #         for j in range(self.num_kernels):
+    #             if xs is None:
+    #                 xs = self.resblocks[i * self.num_kernels + j](hidden)
+    #             else:
+    #                 xs += self.resblocks[i * self.num_kernels + j](hidden)
+    #         hidden = xs / self.num_kernels
 
-        # post conv
-        hidden = self.activation_post(hidden)
-        hidden = self.conv_post(hidden)
-        audio = torch.clamp(hidden, min=-1.0, max=1.0)  # bound the output to [-1, 1]
+    #     # post conv
+    #     hidden = self.activation_post(hidden)
+    #     hidden = self.conv_post(hidden)
+    #     audio = torch.clamp(hidden, min=-1.0, max=1.0)  # bound the output to [-1, 1]
 
-        return audio.squeeze().cpu()
+    #     return audio.squeeze().cpu()
 
+    def forward(self, mel_spectrogram):
+        # print("Qwen2_5OmniToken2WavBigVGANModel_Export apm_mel.shape",mel_spectrogram.shape)
+        # torch.save(mel_spectrogram, "apm_mel.pth")
+        # processed_spectrogram = self.process_mel_spectrogram(mel_spectrogram)
+        processed_spectrogram = mel_spectrogram
+        hidden_representation = self.conv_pre(processed_spectrogram)
+
+        for layer_index in range(self.num_upsample_layers):
+            hidden_representation = self.ups[layer_index][0](hidden_representation)
+            residual_output = sum(
+                self.resblocks[layer_index * self.num_residual_blocks + block_index](hidden_representation)
+                for block_index in range(self.num_residual_blocks)
+            )
+            residual_output = residual_output / self.num_residual_blocks
+            hidden_representation = residual_output
+        
+        hidden_representation = self.activation_post(hidden_representation)
+        
+        output_waveform = self.conv_post(hidden_representation)
+        return torch.clamp(output_waveform, min=-1.0, max=1.0).squeeze().cpu()
+    
     def forward_onnx(self, apm_mel):
 
         print("test Qwen2_5OmniToken2WavBigVGANModel Onnx -------------------")

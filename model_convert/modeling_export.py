@@ -5,7 +5,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np 
 import onnxruntime as ort
-from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniModel, Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniVisionEncoder, Qwen2_5OmniThinkerConfig,\
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniThinkerForConditionalGeneration, Qwen2_5OmniVisionEncoder, Qwen2_5OmniThinkerConfig,\
 Qwen2_5OmniVisionBlock,Qwen2_5OmniVisionSdpaAttention, apply_rotary_pos_emb_vision, Qwen2_5OmniVisionAttention, Qwen2_5OmniTalkerForConditionalGeneration, Qwen2_5OmniToken2WavModel,\
     kaiser_sinc_filter1d
 from audio_export import Qwen2_5OmniAudioEncoder_Export
@@ -53,6 +53,7 @@ class Qwen2_5OmniVisionAttention_Export(Qwen2_5OmniVisionAttention):
         return attn_output
 
 class Qwen2_5OmniVisionSdpaAttention_Export(Qwen2_5OmniVisionSdpaAttention):
+    
     def forward(
         self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, rotary_pos_emb: torch.Tensor = None
     ) -> torch.Tensor:
@@ -69,15 +70,15 @@ class Qwen2_5OmniVisionSdpaAttention_Export(Qwen2_5OmniVisionSdpaAttention):
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
-        attn_output = scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
 class Qwen2_5OmniVisionBlock_Export(Qwen2_5OmniVisionBlock):
-    def __init__(self, config, attn_implementation: str = "sdpa") -> None:
-        super().__init__(config, attn_implementation)
+    def __init__(self, config) -> None:
+        super().__init__(config)
         self.attn = Qwen2_5OmniVisionAttention_Export(
             config.hidden_size, num_heads=config.num_heads
         )
@@ -92,7 +93,7 @@ class Qwen2_5OmniVisionBlock_Export(Qwen2_5OmniVisionBlock):
         return hidden_states
     
 class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
-
+    
     def forward_nchw(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -104,13 +105,13 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
         Returns:
             `torch.Tensor`: hidden_states.
         """
-        torch.save(hidden_states, "hidden_states.pth")
         t, channel, seq_len, tpp = hidden_states.shape
-        assert t==1 
+        # assert t==1 
         hidden_states = hidden_states.permute(0,2,1,3).reshape(t,seq_len, channel*tpp)
-        hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+        hidden_states = self.patch_embed(hidden_states)                         # 968, 1280
+        
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)                             # 968,40
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)       # window_index shape (242,),  cu_window_seqlens： [0, 64, 128, 176, 240, 304, 352, 400, 448, 484, 548, 612, 660, 724, 788, 836, 884, 932, 968]
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
             device=hidden_states.device,
@@ -119,10 +120,10 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
         seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)      # 242,4,1280
         hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        hidden_states = hidden_states.reshape(seq_len, -1)                                                          # 968,1280
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)    # 242,4,40
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
         # emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
@@ -138,10 +139,10 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        torch.save(rotary_pos_emb, "rotary_pos_emb.pth")
-        torch.save(cu_seqlens, "cu_seqlens.pth")
-        torch.save(cu_window_seqlens, "cu_window_seqlens.pth")
-        torch.save(window_index, "window_index.pth")
+        # torch.save(rotary_pos_emb, "rotary_pos_emb.pth")
+        # torch.save(cu_seqlens, "cu_seqlens.pth")
+        # torch.save(cu_window_seqlens, "cu_window_seqlens.pth")
+        # torch.save(window_index, "window_index.pth")
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
@@ -171,8 +172,9 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
         Returns:
             `torch.Tensor`: hidden_states.
         """
+        torch.save(hidden_states, "hidden_states.pth")
         # hidden_states = hidden_states.permute(0,2,3,1)
-        t, channel, grid_hw,  tpp  = hidden_states.shape
+        t, channel, grid_hw,  tpp  = hidden_states.shape                # 2,3,484,392
         # t, grid_hw,  tpp, channel  = hidden_states.shape
         # hidden_states = hidden_states.permute(0,1,3,2).reshape(t*grid_hw, channel*tpp)
 
@@ -180,8 +182,8 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
 
         t,grid_h,grid_w = grid_thw[0]
 
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)                         # 968,40
+        window_index, cu_window_seqlens = self.get_window_index(grid_thw)   # window_index shape 242,   cu_window_seqlens: [0, 64, 128, 176, 240, 304, 352, 400, 448, 484, 548, 612, 660, 724, 788, 836, 884, 932, 968]
 
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
@@ -247,8 +249,8 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
             ht = hidden_states[ti:ti+1]
             print("ht.shape",ht.shape)
             torch.save(ht, "hidden_states.pth")
-            ht = ht.permute(0,2,3,1) 
-            ht = ht.permute(0,1,3,2).reshape(grid_hw, channel*tpp)
+            ht = ht.permute(0,2,3,1)        # 1,484,392,3
+            ht = ht.permute(0,1,3,2).reshape(grid_hw, channel*tpp)  # 1,484, 3*392
             ht = self.patch_embed(ht)
             ht = ht.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
             ht = ht[win_idx_t, :, :]
@@ -268,7 +270,11 @@ class Qwen2_5OmniVisionEncoder_Infer(Qwen2_5OmniVisionEncoder):
 
             out.append(ht)
         out = torch.cat(out, 0)
-        # np.save("vit_out.npy", out.cpu().numpy())
+
+        # out = self.merger(out)
+        # reverse_indices = torch.argsort(window_index)
+        # out = out[reverse_indices, :]
+
         return out
     
 class Qwen2_5OmniThinkerForConditionalGeneration_Infer(Qwen2_5OmniThinkerForConditionalGeneration):
@@ -280,15 +286,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration_Infer(Qwen2_5OmniThinkerForCond
         )
 
 
-class Qwen2_5OmniModel_Infer(Qwen2_5OmniModel):
+class Qwen2_5OmniModel_Infer(Qwen2_5OmniForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
 
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_Infer(config.thinker_config)
 
 def generate_attnmask(seq_length, cu_seqlens):
-    # attention_mask = torch.zeros([1, seq_length, seq_length],  dtype=torch.bool)
-    # for i in range(1, cu_seqlens.shape[0]):
+
+    # attention_mask = torch.zeros([1, seq_length, seq_length], device=cu_seqlens.device, dtype=torch.float32)
+    # for i in range(1, len(cu_seqlens)):
     #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
 
     attention_mask = torch.full(
@@ -319,7 +326,7 @@ class Qwen2_5OmniVisionEncoder_Export(Qwen2_5OmniVisionEncoder):
         self.reverse_indices = torch.argsort(self.window_index)
 
         self.blocks = nn.ModuleList(
-            [Qwen2_5OmniVisionBlock_Export(config, config._attn_implementation) for _ in range(config.depth)]
+            [Qwen2_5OmniVisionBlock_Export(config) for _ in range(config.depth)]
         )
 
     def forward_export(self, hidden_states):
@@ -408,7 +415,7 @@ class Qwen2_5OmniVisionEncoder_Export(Qwen2_5OmniVisionEncoder):
         """
         
         print("test Vision Encoder Onnx -------------------")
-        session = ort.InferenceSession("Qwen2.5-Omni-7B_vision.onnx", providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession("Qwen2.5-Omni-3B_vision.onnx", providers=["CPUExecutionProvider"])
         
         inputs = {"hidden_states": hidden_states.cpu().to(torch.float32).numpy().astype(np.float32),}
         out = session.run(["hidden_states_out"], inputs)[0]
@@ -429,7 +436,7 @@ class Qwen2_5OmniVisionEncoder_Export(Qwen2_5OmniVisionEncoder):
         """
         
         print("test Vision Encoder Onnx -------------------")
-        session = ort.InferenceSession("Qwen2.5-Omni-7B_vision.onnx", providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession("Qwen2.5-Omni-3B_vision.onnx", providers=["CPUExecutionProvider"])
         
         
         t = hidden_states.shape[0]
@@ -458,7 +465,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_Export(Qwen2_5OmniThinkerForCon
         )
 
 
-class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
+class Qwen2_5OmniModel_Export(Qwen2_5OmniForConditionalGeneration):
     def __init__(self, config, max_len_talker_generate_codes=600):
         super().__init__(config)
 
@@ -473,15 +480,17 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
     def enable_talker(self):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration(self.config.talker_config)
         self.token2wav = Qwen2_5OmniToken2WavModel_Export(self.config.token2wav_config) 
-        self.token2wav.float()
+        # self.token2wav = Qwen2_5OmniToken2WavModel(self.config.token2wav_config) 
+        self.token2wav.to(self.config.torch_dtype)
         self.has_talker = True
         
 
     def init_upsampler_downsampler(self):
         
+        
         len_resblocks = len(self.token2wav.code2wav_bigvgan_model.resblocks)
 
-        filter = kaiser_sinc_filter1d(0.25, 0.3, 12)
+        filter = kaiser_sinc_filter1d(0.25, 0.3, 12).to(self.config.torch_dtype)
         for i in range(len_resblocks):
             len_act = len(self.token2wav.code2wav_bigvgan_model.resblocks[i].activations)
             for j in range(len_act):
@@ -507,10 +516,11 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
         self.token2wav.code2wav_bigvgan_model.activation_post.upsample.conv_transpose.weight.requires_grad = False
 
     @torch.no_grad()
+    # TODO: raushan, defaults should be saved in generation config
     def generate(
         self,
-        input_ids: Optional[torch.tensor] = None,
-        spk: str = "Chelsie",
+        input_ids: Optional[torch.Tensor] = None,
+        speaker: str = "Chelsie",
         use_audio_in_video: bool = False,
         return_audio: Optional[bool] = None,
         thinker_max_new_tokens: int = 1024,
@@ -529,7 +539,7 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
         Args:
             input_ids (`Optional[torch.Tensor]`, *optional*):
                 Input ids, should obtain from processor.
-            spk (`str` , defaults to "Chelsie"):
+            speaker (`str` , defaults to "Chelsie"):
                 Which speaker should be used in audio response.
             use_audio_in_video (`bool`, defaults to False):
                 Whether or not use audio track in video, should same as the parameter in `process_audio_info`.
@@ -546,8 +556,8 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
                 - **Text** (`torch.Tensor`): Generated text token sequence.
                 - **Audio waveform** (`torch.Tensor`): Generated audio waveform.
         """
-        if spk not in self.speaker_map:
-            raise ValueError(f"{spk} is not availible, availible speakers: {self.speaker_map.keys()}")
+        if speaker not in self.speaker_map:
+            raise ValueError(f"{speaker} is not availible, availible speakers: {self.speaker_map.keys()}")
         if return_audio and not self.has_talker:
             raise ValueError(
                 "Cannot use talker when talker module not initalized. Use `enable_talker` method or set enable_talker in config to enable talker."
@@ -556,6 +566,7 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             return_audio = self.has_talker
         if input_ids.shape[0] != 1 and return_audio:
             raise NotImplementedError("Qwen2.5-Omni currently does not support batched inference with audio output")
+
         shared_kwargs = {"use_audio_in_video": use_audio_in_video}
         thinker_kwargs = {
             "max_new_tokens": thinker_max_new_tokens,
@@ -587,6 +598,7 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             # Put other key to shared kwargs
             else:
                 shared_kwargs[key] = value
+
         # Merge kwargs
         for key, value in shared_kwargs.items():
             if key not in thinker_kwargs:
@@ -595,22 +607,59 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
                 talker_kwargs[key] = value
             if key not in token2wav_kwargs:
                 token2wav_kwargs[key] = value
-        speaker_params = self.speaker_map[spk]
+        speaker_params = self.speaker_map[speaker]
 
         # 1. Generate from thinker module
-        thinker_result = self.thinker.generate(
-            input_ids=input_ids,
-            return_dict_in_generate=True,
-            output_hidden_states=True,
-            **thinker_kwargs,
-        )
-        if not (return_audio and self.has_talker):
-            return thinker_result.sequences
+        generate_audio = return_audio and self.has_talker
+        if generate_audio:
+            thinker_kwargs["output_hidden_states"] = True
+            thinker_kwargs["return_dict_in_generate"] = True
+
+        thinker_result = self.thinker.generate(input_ids=input_ids, **thinker_kwargs)
+
+        if not generate_audio:
+            return thinker_result
 
         # 2. Generate speech tokens from talker module
-        thinker_generate_ids = thinker_result.sequences[:, input_ids.size(1) :].to(self.talker.device)      # text token ids
-        thinker_token_embeds = [x[0].to(self.talker.device) for x in thinker_result.hidden_states]              # embeds_to_talker, 就是 输入给 thinker lm 的 input_embeds( audio和vision编码用0替代)
-        thinker_hidden_states = [x[1][-1].to(self.talker.device) for x in thinker_result.hidden_states]         # 最后一层过了 norm 的hidden_states, list 长度为输出text长度
+        embeds_to_talker = thinker_result.hidden_states[0][0].clone().to(self.talker.device)
+        if thinker_kwargs.get("input_features", None) is not None:
+            audio_ids_mask = input_ids == self.config.thinker_config.audio_token_index
+            audio_mask = audio_ids_mask.unsqueeze(-1).expand_as(embeds_to_talker).to(embeds_to_talker.device)
+            audio_mask_tensor = torch.zeros(
+                [audio_ids_mask.sum(), embeds_to_talker.shape[-1]],
+                dtype=embeds_to_talker.dtype,
+                device=self.talker.device,
+            )
+            embeds_to_talker.masked_scatter_(audio_mask, audio_mask_tensor)
+        if thinker_kwargs.get("pixel_values", None) is not None:
+            image_ids_mask = input_ids == self.config.thinker_config.image_token_index
+            image_mask = image_ids_mask.unsqueeze(-1).expand_as(embeds_to_talker).to(embeds_to_talker.device)
+            image_mask_tensor = torch.zeros(
+                [image_ids_mask.sum(), embeds_to_talker.shape[-1]],
+                dtype=embeds_to_talker.dtype,
+                device=self.talker.device,
+            )
+            embeds_to_talker.masked_scatter_(image_mask, image_mask_tensor)
+        if thinker_kwargs.get("pixel_values_videos", None) is not None:
+            video_ids_mask = input_ids == self.config.thinker_config.video_token_index
+            video_mask = video_ids_mask.unsqueeze(-1).expand_as(embeds_to_talker).to(embeds_to_talker.device)
+            video_mask_tensor = torch.zeros(
+                [video_ids_mask.sum(), embeds_to_talker.shape[-1]],
+                dtype=embeds_to_talker.dtype,
+                device=self.talker.device,
+            )
+            embeds_to_talker.masked_scatter_(video_mask, video_mask_tensor)
+
+        processed_thinker_hidden = (
+            (embeds_to_talker,) + thinker_result.hidden_states[0][1:],
+        ) + thinker_result.hidden_states[1:]
+        thinker_generate_ids = thinker_result.sequences[:, input_ids.size(1) :].to(self.talker.device)
+        thinker_token_embeds = [
+            token_hidden_states[0].to(self.talker.device) for token_hidden_states in processed_thinker_hidden
+        ]
+        thinker_hidden_states = [
+            token_hidden_states[-1].to(self.talker.device) for token_hidden_states in processed_thinker_hidden
+        ]
 
         talker_text_bos_token = speaker_params["bos_token"]
         talker_input_text_ids = torch.cat(
@@ -621,7 +670,7 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             ],
             dim=-1,
         )
-        print("input_ids",input_ids.shape)
+
         talker_input_ids = torch.cat(
             [
                 torch.full_like(input_ids, fill_value=self.talker.codec_mask_token, device=self.talker.device),
@@ -631,37 +680,43 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             dim=1,
         )
 
+        thinker_embed_tokens = self.thinker.get_input_embeddings()
         thinker_reply_part = torch.cat(thinker_hidden_states[1:], dim=1) + torch.cat(thinker_token_embeds[1:], dim=1)
         talker_inputs_embeds = thinker_hidden_states[0] + thinker_token_embeds[0]
+        talker_text_bos_token = torch.tensor([[talker_text_bos_token]], dtype=torch.long, device=self.thinker.device)
+        talker_text_bos_embed = thinker_embed_tokens(talker_text_bos_token).to(self.talker.device)
         talker_inputs_embeds = torch.cat(
             [
                 talker_inputs_embeds,
-                self.thinker.get_input_embeddings()(
-                    torch.tensor([[talker_text_bos_token]], dtype=torch.long, device=self.thinker.device)
-                ).to(self.talker.device),
+                talker_text_bos_embed,
                 thinker_reply_part[:, :1, :],
             ],
             dim=1,
         )
 
+        eos_embedding = thinker_embed_tokens(
+            torch.tensor([[self.talker.text_eos_token]], dtype=torch.long, device=self.thinker.device)
+        ).to(self.talker.device)
+
+        pad_embedding = thinker_embed_tokens(
+            torch.tensor([[self.talker.text_pad_token]], dtype=torch.long, device=self.thinker.device)
+        ).to(self.talker.device)
+
         thinker_reply_part = torch.cat(
             [
                 thinker_reply_part[:, 1:, :],
-                self.thinker.get_input_embeddings()(
-                    torch.tensor([[self.talker.text_eos_token]], dtype=torch.long, device=self.thinker.device)
-                ).to(self.talker.device),
-                self.thinker.get_input_embeddings()(
-                    torch.tensor([[self.talker.text_pad_token]], dtype=torch.long, device=self.thinker.device)
-                ).to(self.talker.device),
+                eos_embedding,
+                pad_embedding,
             ],
             dim=1,
         )
 
-        talker_attention_mask = torch.cat(
-            [kwargs["attention_mask"], kwargs["attention_mask"].new_ones((1, 2))], dim=1
-        ).to(self.talker.device)
+        talker_attention_mask = None
+        if "attention_mask" in kwargs:
+            talker_attention_mask = torch.cat(
+                [kwargs["attention_mask"], kwargs["attention_mask"].new_ones((1, 2))], dim=1
+            ).to(self.talker.device)
 
-        print("talker_input_ids",talker_input_ids.shape)
         talker_result = self.talker.generate(
             input_ids=talker_input_ids,
             input_text_ids=talker_input_text_ids,
@@ -671,27 +726,28 @@ class Qwen2_5OmniModel_Export(Qwen2_5OmniModel):
             suppress_tokens=[self.talker.codec_bos_token],
             **{k: (v.to(self.talker.device) if torch.is_tensor(v) else v) for k, v in talker_kwargs.items()},
         )
-        print("talker_result",talker_result.shape)
         talker_generate_codes = talker_result[:, talker_input_ids.shape[1] : -1]
-        print("talker_generate_codes",talker_generate_codes.shape)
+
         # 3. Generate wavs from code
         if self.token2wav.dtype != torch.float:
             self.token2wav.float()
-        
+
         # wav = self.token2wav(
         #     talker_generate_codes.to(self.token2wav.device),
-        #     cond=speaker_params["cond"].to(self.token2wav.device).float(),
-        #     ref_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
+        #     conditioning=speaker_params["cond"].to(self.token2wav.device).float(),
+        #     reference_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
         #     **token2wav_kwargs,
         # )
+        
+
         effictive_len = talker_generate_codes.shape[1]
         effictive_len = min(effictive_len , self.max_len_talker_generate_codes)
         padded_talker_generate_codes = torch.zeros((1, self.max_len_talker_generate_codes), dtype=talker_generate_codes.dtype, device=self.token2wav.device)
         padded_talker_generate_codes[:, 0:effictive_len] = talker_generate_codes.to(self.token2wav.device)[:, 0:effictive_len]
         wav = self.token2wav(
             padded_talker_generate_codes,
-            cond=speaker_params["cond"].to(self.token2wav.device).float(),
-            ref_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
+            conditioning=speaker_params["cond"].to(self.token2wav.device).float(),
+            reference_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
             **token2wav_kwargs,
         )
         wav = wav[0:effictive_len*480]

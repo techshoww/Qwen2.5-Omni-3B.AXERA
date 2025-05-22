@@ -1,1 +1,1 @@
-pulsar2 build --input Qwen2.5-Omni-7B_vision.onnx --config config.json --output_dir build-output-nchw308 --output_name Qwen2.5-Omni-7B_vision.axmodel --target_hardware AX650 --compiler.check 0
+pulsar2 build --input Qwen2.5-Omni-3B_vision.onnx --config config.json --output_dir build-output-nchw308-0522 --output_name Qwen2.5-Omni-7B_vision.axmodel --target_hardware AX650 --compiler.check 3 --compiler.check_cosine_simularity 0.97
