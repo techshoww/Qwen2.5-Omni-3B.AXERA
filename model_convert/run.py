@@ -8,7 +8,7 @@ from PIL import Image
 ckpt_dir="/data/lihongjie/Qwen2.5-Omni-3B"
 device= torch.device("cuda:0")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniForConditionalGeneration.from_pretrained(ckpt_dir, torch_dtype=torch.bfloat16, device_map=device)
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained(ckpt_dir, torch_dtype=torch.float32, device_map=device)
 
 
 
@@ -52,3 +52,8 @@ text = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_token
 print(text)
 
 # ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and jeans. It seems like they might have tripped or something. What do you think happened? Do you know the person?"]
+# ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and jeans. It seems like they might have tripped or something. What do you think happened? Do you know the person?"]
+# ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and jeans. It seems like they might have tripped or something. What do you think happened?"]
+# ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and blue jeans. The sidewalk is made of gray tiles. It seems like it could be a busy area. What do you think happened?"]
+# ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and jeans. It seems like they might have tripped or something. What do you think happened?"]
+# ["system\nYou are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.\nuser\n\nassistant\nOh, this is a pretty sad scene. It looks like someone fell on the sidewalk. There's a poster with a heart and balloons in the background. The person who fell is wearing a black coat and jeans. It seems like they might have tripped or something. What do you think happened?"]

@@ -1,23 +1,23 @@
 import soundfile as sf
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from qwen_omni_utils import process_mm_info
 from glob import glob 
 from PIL import Image
 
 # device= torch.device("cpu")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniModel.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="auto", device_map="auto")
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B", torch_dtype="auto", device_map="auto")
 print(model.hf_device_map)  # 输出各层分配的 GPU
 # We recommend enabling flash_attention_2 for better acceleration and memory saving.
-# model = Qwen2_5OmniModel.from_pretrained(
-#     "Qwen/Qwen2.5-Omni-7B",
+# model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+#     "/data/lihongjie/Qwen2.5-Omni-3B",
 #     torch_dtype="auto",
 #     device_map="auto",
 #     attn_implementation="flash_attention_2",
 # )
 
-processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+processor = Qwen2_5OmniProcessor.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B")
 # paths = sorted(glob("demo_cv308/*.jpg"))
 # images = [Image.open(p) for p in paths]
 conversation = [
@@ -43,7 +43,7 @@ audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AU
 print("audios",audios)
 print("images",images)
 print("videos",videos[0].shape)
-inputs = processor(text=text, audios=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=USE_AUDIO_IN_VIDEO)
 print('pixel_values_videos', inputs['pixel_values_videos'].shape)
 torch.save(inputs, "inputs.pth")
 inputs = inputs.to(model.device).to(model.dtype)

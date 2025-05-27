@@ -9,11 +9,10 @@ from preprocess import Qwen2VLImageProcessorExport
 from transformers.image_utils import PILImageResampling
 import numpy as np
 ckpt_dir="/data/lihongjie/Qwen2.5-Omni-3B"
-device = torch.device("cuda")
+device = torch.device("cuda:1")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniModel_Infer.from_pretrained(ckpt_dir, torch_dtype=torch.bfloat16, device_map=device)
+model = Qwen2_5OmniModel_Infer.from_pretrained(ckpt_dir, torch_dtype=torch.float32, device_map=device)
 model.thinker.visual.forward = model.thinker.visual.forward_by_second_nchw
-
 
 
 processor = Qwen2_5OmniProcessor.from_pretrained(ckpt_dir)

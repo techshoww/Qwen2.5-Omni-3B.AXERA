@@ -4,17 +4,17 @@ from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcess
 from qwen_omni_utils import process_mm_info
 
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="auto", device_map="auto")
+model = Qwen2_5OmniForConditionalGeneration.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B", torch_dtype="auto", device_map="auto")
 
 # We recommend enabling flash_attention_2 for better acceleration and memory saving.
 # model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-#     "Qwen/Qwen2.5-Omni-7B",
+#     "/data/lihongjie/Qwen2.5-Omni-3B",
 #     torch_dtype="auto",
 #     device_map="auto",
 #     attn_implementation="flash_attention_2",
 # )
 
-processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+processor = Qwen2_5OmniProcessor.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B")
 
 conversation = [
     {

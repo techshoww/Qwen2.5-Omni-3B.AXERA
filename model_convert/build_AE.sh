@@ -1,1 +1,1 @@
-pulsar2 build --input audio_tower.onnx --config config_audio.json --output_dir build-output-audio-endtoend-0521 --output_name audio_tower.axmodel --target_hardware AX650 --compiler.check 3 --compiler.check_cosine_simularity 0.99
+pulsar2 build --input audio_tower.onnx --config config_audio.json --output_dir build-output-audio --output_name audio_tower.axmodel --target_hardware AX650 --compiler.check 3 --compiler.check_cosine_simularity 0.99

@@ -10,18 +10,18 @@ from transformers.image_utils import PILImageResampling
 
 device = torch.device("cuda")
 # default: Load the model on the available device(s)
-model = Qwen2_5OmniModel_Export.from_pretrained("Qwen/Qwen2.5-Omni-7B", torch_dtype="auto", device_map=device)
+model = Qwen2_5OmniModel_Export.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B", torch_dtype="auto", device_map=device)
 model.thinker.visual.forward = model.thinker.visual.forward_onnx_by_second_nchw
 
 # We recommend enabling flash_attention_2 for better acceleration and memory saving.
-# model = Qwen2_5OmniModel.from_pretrained(
-#     "Qwen/Qwen2.5-Omni-7B",
+# model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+#     "/data/lihongjie/Qwen2.5-Omni-3B",
 #     torch_dtype="auto",
 #     device_map="auto",
 #     attn_implementation="flash_attention_2",
 # )
 
-processor = Qwen2_5OmniProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B")
+processor = Qwen2_5OmniProcessor.from_pretrained("/data/lihongjie/Qwen2.5-Omni-3B")
 # paths = sorted(glob("demo_cv308/*.jpg"))
 # images = [Image.open(p) for p in paths]
 conversation = [
@@ -92,7 +92,7 @@ pixel_values = (pixel_values-mean)/std
 pixel_values = pixel_values.permute(0,3,1,2).to("cuda")
 
 
-inputs = processor(text=text, audios=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=USE_AUDIO_IN_VIDEO)
 
 # inputs["pixel_values_videos"] = pixel_values
 inputs["pixel_values_videos"] = inputs["pixel_values_videos"].view(2,484,3,392).permute(0,2,1,3)

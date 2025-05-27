@@ -16,23 +16,7 @@
     "precision_analysis_method": "PerLayer",
     "conv_bias_data_type": "FP32",
     "enable_smooth_quant": true,
-	  "disable_auto_refine_scale": true,
-    "layer_configs":  [
-      {
-        "start_tensor_names": ["DEFAULT"], 
-        "end_tensor_names": ["DEFAULT"], 
-        "data_type": "U16"
-      },
-      {
-        "op_type": "Softmax",
-        "data_type": "FP32"
-      },
-      {
-        "op_type": "MatMul",
-        "data_type": "FP32"
-      }
-
-    ]
+	  "disable_auto_refine_scale": true
   },
 
   "compiler": {

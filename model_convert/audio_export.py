@@ -383,6 +383,9 @@ class Qwen2_5OmniAudioEncoder_Export(Qwen2_5OmniAudioEncoder):
         dir_calib_audio = "calib_audio"
         os.makedirs(dir_calib_audio, exist_ok=True)
         time_str = str(time.time())
+        torch.save(padded_feature, "padded_feature.pth")
+        torch.save(padded_mask, "padded_mask.pth")
+        torch.save(attention_mask, "attention_mask.pth")
         np.save(f"{dir_calib_audio}/padded_feature_{time_str}.npy", padded_feature.cpu().numpy())
         np.save(f"{dir_calib_audio}/padded_mask_{time_str}.npy", padded_mask.cpu().numpy())
         np.save(f"{dir_calib_audio}/attention_mask_{time_str}.npy", attention_mask.cpu().numpy())

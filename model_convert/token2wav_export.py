@@ -1022,8 +1022,7 @@ class Qwen2_5OmniToken2WavBigVGANModel_Export(Qwen2_5OmniToken2WavBigVGANModel):
     def forward(self, mel_spectrogram):
         # print("Qwen2_5OmniToken2WavBigVGANModel_Export apm_mel.shape",mel_spectrogram.shape)
         # torch.save(mel_spectrogram, "apm_mel.pth")
-        # processed_spectrogram = self.process_mel_spectrogram(mel_spectrogram)
-        processed_spectrogram = mel_spectrogram
+        processed_spectrogram = self.process_mel_spectrogram(mel_spectrogram)
         hidden_representation = self.conv_pre(processed_spectrogram)
 
         for layer_index in range(self.num_upsample_layers):
@@ -1044,7 +1043,7 @@ class Qwen2_5OmniToken2WavBigVGANModel_Export(Qwen2_5OmniToken2WavBigVGANModel):
 
         print("test Qwen2_5OmniToken2WavBigVGANModel Onnx -------------------")
       
-        session = ort.InferenceSession("token2wav_bigvgan.onnx", providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession("token2wav_bigvgan-full.onnx", providers=["CPUExecutionProvider"])
 
         inputs = {"apm_mel":apm_mel.cpu().numpy()}
         out = session.run(["output"], inputs)[0]

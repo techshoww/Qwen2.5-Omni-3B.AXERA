@@ -6,7 +6,7 @@ import librosa
 from io import BytesIO
 from urllib.request import urlopen
 import torch
-from transformers import Qwen2_5OmniModel, Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from audio_export import Qwen2_5OmniModel_Export
 # @title inference function
 def inference(audio_path, prompt, sys_prompt):
@@ -22,7 +22,7 @@ def inference(audio_path, prompt, sys_prompt):
     print("text:", text)
     # image_inputs, video_inputs = process_vision_info([messages])
     audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-    inputs = processor(text=text, audios=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True)
+    inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True)
     inputs = inputs.to(model.device).to(model.dtype)
 
     output = model.generate(**inputs, use_audio_in_video=True, return_audio=False)
@@ -35,7 +35,7 @@ def inference(audio_path, prompt, sys_prompt):
 
 
 device = torch.device("cpu")
-model_path = "Qwen/Qwen2.5-Omni-7B"
+model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.float32,
