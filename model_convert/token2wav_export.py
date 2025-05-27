@@ -1043,7 +1043,7 @@ class Qwen2_5OmniToken2WavBigVGANModel_Export(Qwen2_5OmniToken2WavBigVGANModel):
 
         print("test Qwen2_5OmniToken2WavBigVGANModel Onnx -------------------")
       
-        session = ort.InferenceSession("token2wav_bigvgan-full.onnx", providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession("token2wav_bigvgan.onnx", providers=["CPUExecutionProvider"])
 
         inputs = {"apm_mel":apm_mel.cpu().numpy()}
         out = session.run(["output"], inputs)[0]

@@ -1,12 +1,14 @@
 from qwen_omni_utils import process_mm_info
 import torch
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
-from modeling_export import Qwen2_5OmniModel_Export
+from transformers.image_utils import PILImageResampling
 import librosa
 import audioread
 import soundfile as sf
+import sys 
+from modeling_export import Qwen2_5OmniModel_Export
 from preprocess import Qwen2VLImageProcessorExport
-from transformers.image_utils import PILImageResampling
+
 # @title inference function
 def inference(video_path):
     messages = [
@@ -72,7 +74,7 @@ def inference(video_path):
 
 
 device = torch.device("cpu")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = "../../Qwen2.5-Omni-3B/"
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,
