@@ -29,6 +29,7 @@ def inference(video_path):
     inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True, min_pixels=308*308, max_pixel=308*308)
     inputs = inputs.to(model.device).to(model.dtype)
     print("videos",videos[0].shape)
+    print("input_ids shape",inputs['input_ids'].shape)
     print('pixel_values_videos', inputs['pixel_values_videos'].shape)
     # inputs["pixel_values_videos"] = inputs["pixel_values_videos"].view(2,484,3,392).permute(0,2,1,3)
 
@@ -64,14 +65,14 @@ def inference(video_path):
     # inputs["pixel_values_videos"] = pixel_values
 
     text_ids, audio = model.generate(**inputs, use_audio_in_video=True, return_audio=True)
-
+    print("text_ids len", text_ids.shape)
     text = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
    
     return text,audio
 
 
 device = torch.device("cuda")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = "../../Qwen2.5-Omni-3B"
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,

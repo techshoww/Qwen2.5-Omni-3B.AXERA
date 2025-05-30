@@ -22,19 +22,48 @@ from ml_dtypes import bfloat16
 from itertools import accumulate
 import operator
 from scipy.special import softmax
+import gc
+import os 
 
-class ONNXInfer:
-    def __init__(self, onnx_path):
-        self.session = ort.InferenceSession(onnx_path, providers=["AxEngineExecutionProvider"])
+# class ONNXInfer:
+#     def __init__(self, onnx_path):
+#         self.session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
         
-    def __call__(self, inputs):
+#     def __call__(self, inputs):
    
-        outputs = self.session.run(None, inputs)
+#         outputs = self.session.run(None, inputs)
+#         return outputs
+
+class InferEngine:
+    def __init__(self, path):
+        self.path = path
+
+        model_type = os.path.splitext(path)[1]
+        
+        engine = None
+        if model_type == ".onnx":
+            engine = ort.InferenceSession
+        elif model_type == ".axmodel":
+            engine = InferenceSession
+        else:
+            raise NotImplementedError(f"Not supported model type: {model_type}")
+        
+        assert engine is not None 
+
+        self.session = engine(path)
+
+    def run(self, outputnames, inputs, shape_group=None):
+        if shape_group is None:
+            outputs = self.session.run(outputnames, inputs)
+        else:
+            outputs = self.session.run(outputnames, inputs, shape_group=shape_group)
         return outputs
+
+
 
 class AXModelInferStatic:
     def __init__(self, axmodel_path):
-        self.session = InferenceSession(axmodel_path, providers=["AxEngineExecutionProvider"])
+        self.session = InferEngine(axmodel_path)
         
     def __call__(self, inputs, shape_group=None):
         print("shape_group",shape_group)
@@ -50,7 +79,7 @@ class AXModelInferDynamic:
         
     def __call__(self, inputs, shape_group=None):
         print("shape_group",shape_group)
-        session = InferenceSession(self.axmodel_path, providers=["AxEngineExecutionProvider"])
+        session = InferEngine(self.axmodel_path)
         if shape_group is None:
             outputs = session.run(None, inputs)
         else:
@@ -66,7 +95,14 @@ class AXModelInfer:
             self.model = AXModelInferStatic(axmodel_path)
     
     def __call__(self, inputs, shape_group=None):
-        outputs = self.model(inputs, shape_group)
+        try:
+            outputs = self.model(inputs, shape_group)
+        except Exception as e:
+            if hasattr(self.model, "axmodel_path"):
+                print(f"axmodel_path:{self.model.axmodel_path}")
+            print(e)
+            raise e
+
         return outputs
 
 
@@ -913,24 +949,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         self.config = config
         self.audio_tower = Qwen2_5OmniAudioEncoder_AXInfer(config.audio_config, "../audio_tower.axmodel")
         self.visual = Qwen2_5OmniVisionEncoder_AXInfer(config.vision_config, "../Qwen2.5-Omni-7B_vision.axmodel")
-        self.text_model = AXLanguageModelInfer(config.text_config, "../../Qwen2.5-Omni-3B-AX650N-prefill544/", "qwen2_5_omni_text", 544, 1023, run_dynamic)
-        self.processor = Qwen2_5OmniProcessor.from_pretrained("../../Qwen2.5-Omni-3B-AX650N-prefill544/") 
+        self.text_model = AXLanguageModelInfer(config.text_config, "../../Qwen2.5-Omni-3B-AX650N-prefill352/", "qwen2_5_omni_text", 352, 1023, run_dynamic)
+        self.processor = Qwen2_5OmniProcessor.from_pretrained("../../Qwen2.5-Omni-3B-AX650N-prefill352/") 
 
     def __call__(self, messages):
-        # messages = [
-        #     {
-        #         "role": "system",
-        #         "content": [
-        #             {"type":"text", "text":"You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
-        #         ],
-        #     },
-        #     {
-        #         "role": "user",
-        #         "content": [
-        #             {"type": "video", "video": video_path, "max_pixels": 308 * 308, "min_pixels": 308 * 308, "fps": 1.0,} ,
-        #         ],
-        #     },
-        # ]
         print("start")
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         print("text",text)
@@ -1012,7 +1034,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
         
-        print("audio_features",audio_features)
+            print("audio_features",audio_features)
+            del audio_features
+            del self.audio_tower
+            gc.collect()
         
         image_grid_thw = inputs.get("image_grid_thw", None)
         video_grid_thw = inputs.get("video_grid_thw", None)
@@ -1030,7 +1055,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
                     )
             video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-        
+
+            del video_embeds
+            del self.visual
+            gc.collect()
+
         use_audio_in_video = True
         
         second_per_grids = torch.ones(1)
