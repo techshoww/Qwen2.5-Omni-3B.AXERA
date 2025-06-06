@@ -218,7 +218,7 @@ class AxLMInfer:
 
         post_out = self.post_process_session(
             {"input": data[:, token_len - 1 : token_len, :]}
-        )
+        )[0]
 
         # post_norm = []
         # for ti in range(token_len):
@@ -278,7 +278,7 @@ class AxLMInfer:
                 pass
             else:
 
-                post_out = self.post_process_session({"input": data})
+                post_out = self.post_process_session({"input": data})[0]
                 # thinker_hidden_states.append(post_norm)
                 print("post_out", post_out.shape)
                 next_token, posssible_tokens, possible_soft = post_process(post_out)
