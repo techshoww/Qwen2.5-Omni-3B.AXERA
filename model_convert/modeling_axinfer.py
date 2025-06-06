@@ -24,6 +24,7 @@ import operator
 from scipy.special import softmax
 import gc
 import os 
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 class InferEngine:
     def __init__(self, path):
@@ -52,24 +53,24 @@ class InferEngine:
 
 
 
-class AXModelInferStatic:
+class AxModelInferStatic:
     def __init__(self, axmodel_path):
         self.session = InferEngine(axmodel_path)
         
     def __call__(self, inputs, shape_group=None):
-        print("shape_group",shape_group)
+
         if shape_group is None:
             outputs = self.session.run(None, inputs)
         else:
             outputs = self.session.run(None, inputs, shape_group=shape_group)
         return outputs
 
-class AXModelInferDynamic:
+class AxModelInferDynamic:
     def __init__(self, axmodel_path):
         self.axmodel_path = axmodel_path
         
     def __call__(self, inputs, shape_group=None):
-        print("shape_group",shape_group)
+
         session = InferEngine(self.axmodel_path)
         if shape_group is None:
             outputs = session.run(None, inputs)
@@ -78,12 +79,12 @@ class AXModelInferDynamic:
 
         return outputs
 
-class AXModelInfer:
+class AxModelInfer:
     def __init__(self, axmodel_path, run_dynamic=False):
         if run_dynamic:
-            self.model = AXModelInferDynamic(axmodel_path)
+            self.model = AxModelInferDynamic(axmodel_path)
         else:
-            self.model = AXModelInferStatic(axmodel_path)
+            self.model = AxModelInferStatic(axmodel_path)
     
     def __call__(self, inputs, shape_group=None):
         try:
@@ -472,8 +473,166 @@ def get_rope_index(
 
         return position_ids, mrope_position_deltas
 
+class AxLMInfer:
+    def __init__(self, cfg, mode_dir, model_name, prefill_len, lastN, run_dynamic=False):
+       
+        # model_name="qwen2_5_omni_text"
+        self.cfg = cfg
+        self.prefill_len = prefill_len
 
-class AXLanguageModelInfer:
+        self.num_hidden_layers = self.cfg.num_hidden_layers
+        self.hidden_size = self.cfg.hidden_size
+        
+        self.prefill_decoder_sessins = []
+        for i in range(self.num_hidden_layers):
+            # session = InferenceSession(
+            #     f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.AxModel"
+            # )
+            session = AxModelInfer(f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel", run_dynamic)
+            self.prefill_decoder_sessins.append(session)
+        # self.post_process_session = InferenceSession(
+        #     f"{mode_dir}/{model_name}_post.axmodel"
+        # )
+        self.post_process_session = AxModelInfer(f"{mode_dir}/{model_name}_post.axmodel", run_dynamic)
+        self.embeds = np.load(f"{mode_dir}/model.embed_tokens.weight.npy")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            mode_dir, trust_remote_code=True
+        )
+        self.lastN = lastN
+
+    def embed_tokens(self, input_ids):
+        return np.take(self.embeds, input_ids, axis=0)
+
+    def __call__(
+            self,
+            input_ids = None,
+            inputs_embeds = None,
+            position_ids = None,
+        ):
+        
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if input_ids is None:
+            input_ids = []
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+       
+        hidden_states = inputs_embeds
+
+        kv_dim = self.cfg.hidden_size // self.cfg.num_attention_heads * self.cfg.num_key_value_heads
+        k_caches = [
+            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
+            for _ in range(self.cfg.num_hidden_layers)
+        ]
+        v_caches = [
+            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
+            for _ in range(self.cfg.num_hidden_layers)
+        ]
+
+        print("hidden_states.shape",hidden_states.shape)
+        token_len = hidden_states.shape[1]
+
+        indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
+        print("token_len",token_len)
+        print("position_ids.shape",position_ids.shape)
+        indices[:, 0:token_len] = position_ids.squeeze(1).astype(np.uint32)
+        print("indices", indices.shape)
+        mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
+        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(bfloat16)
+        thinker_token_embeds = []
+        thinker_hidden_states = []
+        print("data",data.shape)
+        data[:, 0:token_len] = hidden_states
+        thinker_token_embeds.append(data[:, 0:token_len])
+        for i in range(token_len):
+            mask[:, i, : i + 1] = 0
+
+        mask = mask.astype(bfloat16)
+        for i in range(self.num_hidden_layers):
+            input_feed = {
+                "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                "indices": indices,
+                "input": data,
+                "mask": mask,
+            }
+            outputs = self.prefill_decoder_sessins[i]( input_feed, shape_group=1)
+
+            k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
+            v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
+            data[:, 0:token_len] = outputs[2][:, :token_len, :]
+
+        _, post_out = self.post_process_session( {"input": data[:, token_len - 1:token_len, :]})
+        
+        post_norm = []
+        for ti in range(token_len):
+            
+            pn, _ = self.post_process_session( {"input": data[:, ti:ti+1, :]})
+            
+            post_norm.append(pn)
+        post_norm = np.concatenate(post_norm, axis=1)
+        
+        thinker_hidden_states.append(post_norm)
+        print("post_out",post_out, post_out.shape)
+        next_token, posssible_tokens, possible_soft = post_process(post_out, topk=1)
+        posibles = [self.tokenizer.decode([t]) for t in posssible_tokens]
+        posible_soft = [str((t, s)) for t, s in zip(posibles, possible_soft)]
+        input_ids.append(next_token)
+        print("posibles",posibles)
+        print(self.tokenizer.decode(input_ids[-1:]))
+        print("prefill done!")
+    
+        # set to decoder
+        
+        start_ids = np.max(indices) + 1
+        mask = np.zeros((1, 1, self.lastN + 1), dtype=np.float32).astype(bfloat16)
+        mask[:, :, :self.lastN] -= 65536
+        mask[:, :, :token_len] = 0
+        for start_indice in range( np.max(indices) + 1, self.lastN + 1):
+            
+            if self.prefill_len > 0 and start_indice < token_len:
+                continue
+            next_token = input_ids[start_indice]
+            indices = np.array([start_ids], np.uint32).reshape((1, 1))
+            start_ids += 1
+            data = self.embeds[next_token, :].reshape((1, 1, self.hidden_size)).astype(bfloat16)
+            thinker_token_embeds.append(data)
+            print("553, indices",indices.shape)
+            for i in range(self.cfg.num_hidden_layers):
+                # print("decode layer:",i)
+                input_feed = {
+                    "K_cache": k_caches[i],
+                    "V_cache": v_caches[i],
+                    "indices": indices,
+                    "input": data,
+                    "mask": mask,
+                }
+                
+                outputs = self.prefill_decoder_sessins[i]( input_feed, shape_group=0)
+                
+                k_caches[i][:, start_indice, :] = outputs[0][:, :, :]
+                v_caches[i][:, start_indice, :] = outputs[1][:, :, :]
+                data = outputs[2]
+            mask[..., start_indice] = 0
+            if start_indice < token_len - 1:
+                pass
+            else:
+                
+                post_norm, post_out = self.post_process_session( {"input": data})
+                thinker_hidden_states.append(post_norm)
+                print("post_out",post_out.shape)
+                next_token, posssible_tokens, possible_soft = post_process(post_out)
+                input_ids.append(next_token)
+                print(self.tokenizer.decode(input_ids[-1:]))
+            if next_token == self.tokenizer.eos_token_id:
+                # print("hit eos!")
+                break
+        
+        return input_ids , thinker_token_embeds, thinker_hidden_states
+
+
+class AxLanguageModelInfer:
     def __init__(self, cfg, mode_dir, model_name, prefill_len, lastN, run_dynamic=False):
        
         # model_name="qwen2_5_omni_text"
@@ -488,12 +647,12 @@ class AXLanguageModelInfer:
             # session = InferenceSession(
             #     f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel"
             # )
-            session = AXModelInfer(f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel", run_dynamic)
+            session = AxModelInfer(f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel", run_dynamic)
             self.prefill_decoder_sessins.append(session)
         # self.post_process_session = InferenceSession(
         #     f"{mode_dir}/{model_name}_post.axmodel"
         # )
-        self.post_process_session = AXModelInfer(f"{mode_dir}/{model_name}_post.axmodel", run_dynamic)
+        self.post_process_session = AxModelInfer(f"{mode_dir}/{model_name}_post.axmodel", run_dynamic)
         self.embeds = np.load(f"{mode_dir}/model.embed_tokens.weight.npy")
         self.tokenizer = AutoTokenizer.from_pretrained(
             mode_dir, trust_remote_code=True
@@ -534,8 +693,11 @@ class AXLanguageModelInfer:
         print("indices", indices.shape)
         mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
         data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(bfloat16)
+        thinker_token_embeds = []
+        thinker_hidden_states = []
         print("data",data.shape)
         data[:, 0:token_len] = prefill_data
+        thinker_token_embeds.append(data[:, 0:token_len])
         for i in range(token_len):
             mask[:, i, : i + 1] = 0
 
@@ -554,8 +716,17 @@ class AXLanguageModelInfer:
             v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
             data[:, 0:token_len] = outputs[2][:, :token_len, :]
 
-        post_norm, post_out = self.post_process_session( {"input": data[:, token_len - 1:token_len, :]})
-
+        _, post_out = self.post_process_session( {"input": data[:, token_len - 1:token_len, :]})
+        
+        post_norm = []
+        for ti in range(token_len):
+            
+            pn, _ = self.post_process_session( {"input": data[:, ti:ti+1, :]})
+            
+            post_norm.append(pn)
+        post_norm = np.concatenate(post_norm, axis=1)
+        
+        thinker_hidden_states.append(post_norm)
         print("post_out",post_out, post_out.shape)
         next_token, posssible_tokens, possible_soft = post_process(post_out, topk=1)
         posibles = [self.tokenizer.decode([t]) for t in posssible_tokens]
@@ -579,6 +750,7 @@ class AXLanguageModelInfer:
             indices = np.array([start_ids], np.uint32).reshape((1, 1))
             start_ids += 1
             data = self.embeds[next_token, :].reshape((1, 1, self.hidden_size)).astype(bfloat16)
+            thinker_token_embeds.append(data)
             print("553, indices",indices.shape)
             for i in range(self.cfg.num_hidden_layers):
                 # print("decode layer:",i)
@@ -601,6 +773,7 @@ class AXLanguageModelInfer:
             else:
                 
                 post_norm, post_out = self.post_process_session( {"input": data})
+                thinker_hidden_states.append(post_norm)
                 print("post_out",post_out.shape)
                 next_token, posssible_tokens, possible_soft = post_process(post_out)
                 token_ids.append(next_token)
@@ -609,13 +782,13 @@ class AXLanguageModelInfer:
                 # print("hit eos!")
                 break
         
-        return self.tokenizer.decode(token_ids[token_len:])
+        return self.tokenizer.decode(token_ids[token_len:]), token_ids[token_len:] , thinker_token_embeds, thinker_hidden_states
     
 
 class Qwen2_5OmniAudioEncoder_AXInfer:
     def __init__(self, config, axmodel_path):
         self.config = config
-        self.model = AXModelInfer(axmodel_path)
+        self.model = AxModelInfer(axmodel_path)
         self.n_window = config.n_window
         self.dtype = torch.bfloat16
 
@@ -747,7 +920,7 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
 class Qwen2_5OmniVisionEncoder_AXInfer:
     def __init__(self, config, axmodel_path):
         self.config = config 
-        self.model = AXModelInfer(axmodel_path)
+        self.model = AxModelInfer(axmodel_path)
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.fullatt_block_indexes = config.fullatt_block_indexes
@@ -785,7 +958,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         self.config = config
         self.audio_tower = Qwen2_5OmniAudioEncoder_AXInfer(config.audio_config, "../audio_tower.axmodel")
         self.visual = Qwen2_5OmniVisionEncoder_AXInfer(config.vision_config, "../Qwen2.5-Omni-7B_vision.axmodel")
-        self.text_model = AXLanguageModelInfer(config.text_config, "../../Qwen2.5-Omni-3B-AX650N-prefill352/", "qwen2_5_omni_text", 352, 1023, run_dynamic)
+        self.text_model = AxLanguageModelInfer(config.text_config, "../../Qwen2.5-Omni-3B-AX650N-prefill352/", "qwen2_5_omni_text", 352, 1023, run_dynamic)
         self.processor = Qwen2_5OmniProcessor.from_pretrained("../../Qwen2.5-Omni-3B-AX650N-prefill352/") 
 
     def __call__(self, messages):
@@ -903,27 +1076,150 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         position_ids,_ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw, attention_mask, use_audio_in_video, audio_feature_lengths, second_per_grids)
         print("position_ids",position_ids)
         print("input_ids",input_ids)
-        output = self.text_model(input_ids[0].tolist(), inputs_embeds, position_ids.cpu().numpy())
+        output, output_token_ids, thinker_token_embeds, thinker_hidden_states = self.text_model(input_ids[0].tolist(), inputs_embeds, position_ids.cpu().numpy())
 
-        return output
+        return output, thinker_token_embeds, thinker_hidden_states, input_ids, output_token_ids
 
+class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
+    def __init__(self, cfg,  run_dynamic=False):
+        
+        model_dir = "../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/"
+        self.thinker_to_talker_proj = AxModelInfer(f"{model_dir}/thinker_to_talker_proj.onnx")
+        self.model = AxLMInfer(cfg, model_dir, "qwen2_5_omni_talker", 352, 1023, run_dynamic)
+        self.text_eos_token = 151861
+        self.text_pad_token = 151859
+        self.codec_mask_token = 8296
+        self.codec_pad_token = 8292
+        self.codec_bos_token = 8293
+        self.config = cfg
+        
+
+    def __call__(self, input_ids, input_text_ids, thinker_reply_part, inputs_embeds, attention_mask, suppress_tokens):
+        image_grid_thw = None 
+        video_grid_thw = torch.tensor([[2,22,22]])
+        use_audio_in_video = True
+        audio_feature_lengths = torch.tensor([160])
+        second_per_grids = torch.tensor([1])
+        position_ids,_ = get_rope_index(self.config, input_ids, image_grid_thw, video_grid_thw, attention_mask, use_audio_in_video, audio_feature_lengths, second_per_grids)
+        inputs_embeds[:, -1, :] += torch.from_numpy(self.model.embeds[self.codec_bos_token])
+        inputs_embeds[:, -2, :] += torch.from_numpy(self.model.embeds[self.codec_pad_token])
+
+        talker_lm_input = self.thinker_to_talker_proj( {"input":inputs_embeds.numpy()} )
+        
+        outputs_,_ = self.model(input_embeds=talker_lm_input, position_ids=position_ids)
+        return outputs
+
+ 
 class Qwen2_5OmniModel_AXInfer:
-    def __init__(self, config, max_len_talker_generate_codes=600, run_dynamic=False):
+    def __init__(self, config, max_len_talker_generate_codes=600, run_dynamic=False, enable_audio_output=True):
         self.config = config
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AXInfer(config.thinker_config, run_dynamic=run_dynamic)
 
-    #     self.has_talker = config.enable_audio_output
-    #     if config.enable_audio_output:
-    #         self.enable_talker()
+        self.has_talker = enable_audio_output
+        self.speaker_map = {}
+        if enable_audio_output:
+            self.enable_talker()
+            self.load_speakers("../../Qwen2.5-Omni-3B/spk_dict.pt")
 
-    #     self.max_len_talker_generate_codes = max_len_talker_generate_codes
+        self.max_len_talker_generate_codes = max_len_talker_generate_codes
 
-    # def enable_talker(self):
-    #     self.talker = Qwen2_5OmniTalkerForConditionalGeneration(self.config.talker_config)
-    #     self.token2wav = Qwen2_5OmniToken2WavModel_Export(self.config.token2wav_config) 
-    #     # self.token2wav = Qwen2_5OmniToken2WavModel(self.config.token2wav_config) 
-    #     self.token2wav.to(self.config.torch_dtype)
-    #     self.has_talker = True
+    def enable_talker(self):
+        self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(self.config.talker_config)
+        self.token2wav = Qwen2_5OmniToken2WavModel_Export(self.config.token2wav_config) 
+        self.has_talker = True
 
-    def __call__(self, messages):
-        return self.thinker(messages)
+    def load_speakers(self, path):
+        for key, value in torch.load(path).items():
+            self.speaker_map[key] = value
+        print("Speaker {} loaded".format(list(self.speaker_map.keys())))
+
+    def __call__(self, messages, speaker: str = "Chelsie",):
+        thinker_result, thinker_token_embeds, thinker_hidden_states, input_ids, output_token_ids = self.thinker(messages)
+
+        speaker_params = self.speaker_map[speaker]
+        print(thinker_result)
+        print("len thinker_token_embeds", len(thinker_token_embeds))
+        print("len thinker_token_embeds[0]", len(thinker_token_embeds[0]))
+        print("thinker_token_embeds[0][0].shape",thinker_token_embeds[0].shape)
+        print("thinker_token_embeds[1][0].shape",thinker_token_embeds[1].shape)
+
+        print("len thinker_hidden_states", len(thinker_hidden_states))
+        print("len thinker_hidden_states[0]", len(thinker_hidden_states[0]))
+        print("thinker_hidden_states[0][0].shape",thinker_hidden_states[0].shape)
+        print("thinker_hidden_states[1][0].shape",thinker_hidden_states[1].shape)
+
+        thinker_token_embeds = torch.from_numpy(thinker_token_embeds)
+        thinker_hidden_states = torch.from_numpy(thinker_hidden_states)
+
+        thinker_reply_part = torch.cat(thinker_hidden_states[1:], dim=1) + torch.cat(thinker_token_embeds[1:], dim=1)
+        talker_inputs_embeds = thinker_hidden_states[0] + thinker_token_embeds[0]
+        talker_text_bos_token = speaker_params["bos_token"]
+        talker_text_bos_embed = self.thinker.text_model.embeds[talker_text_bos_token]
+        talker_text_bos_embed = torch.from_numpy(talker_text_bos_embed)
+
+        talker_inputs_embeds = torch.cat(
+            [
+                talker_inputs_embeds,
+                talker_text_bos_embed,
+                thinker_reply_part[:, :1, :],
+            ],
+            dim=1,
+        )
+        
+        eos_embedding = self.thinker.text_model.embeds[self.talker.text_eos_token]
+        eos_embedding = torch.from_numpy(eos_embedding)
+
+        pad_embedding = self.thinker.text_model.embeds[self.talker.text_pad_token]
+        pad_embedding = torch.from_numpy(pad_embedding)
+
+        thinker_reply_part = torch.cat(
+            [
+                thinker_reply_part[:, 1:, :],
+                eos_embedding,
+                pad_embedding,
+            ],
+            dim=1,
+        )
+
+        input_ids = torch.from_numpy(input_ids)
+
+        thinker_generate_ids = torch.tensor(output_token_ids).reshape(1,-1)
+        talker_input_text_ids = torch.cat(
+            [
+                input_ids,
+                torch.tensor([[talker_text_bos_token]], dtype=torch.long, ),
+                thinker_generate_ids[:, :1],
+            ],
+            dim=-1,
+        )
+
+        talker_input_ids = torch.cat(
+            [
+                torch.full_like(input_ids, fill_value=self.talker.codec_mask_token, ),
+                torch.tensor([[self.talker.codec_pad_token]], dtype=torch.long, ),
+                torch.tensor([[self.talker.codec_bos_token]], dtype=torch.long, ),
+            ],
+            dim=1,
+        )
+
+        talker_attention_mask = torch.cat(
+                [torch.ones(1,334), torch.ones(1,334).new_ones((1, 2))], dim=1
+            )
+
+        talker_generate_codes = self.talker(talker_input_ids, talker_input_text_ids, thinker_reply_part, talker_inputs_embeds, suppress_tokens=[self.talker.codec_bos_token])
+        print("talker_generate_codes",len(talker_generate_codes))
+        talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1,-1)
+        effictive_len = len(talker_generate_codes)
+        effictive_len = min(effictive_len , self.max_len_talker_generate_codes)
+        padded_talker_generate_codes = torch.zeros((1, self.max_len_talker_generate_codes))
+        padded_talker_generate_codes[:, 0:effictive_len] = talker_generate_codes[:, 0:effictive_len]
+
+        
+        wav = self.token2wav(
+            padded_talker_generate_codes,
+            conditioning=speaker_params["cond"].to(self.token2wav.device).float(),
+            reference_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
+        )
+        wav = wav[0:effictive_len*480]
+        print("wav",wav.shape)
+        return thinker_result.sequences, wav.float()
