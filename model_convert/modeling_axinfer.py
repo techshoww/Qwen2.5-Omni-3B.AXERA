@@ -1106,10 +1106,165 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
 
         talker_lm_input = self.thinker_to_talker_proj( {"input":inputs_embeds.numpy()} )
         
-        outputs_,_ = self.model(input_embeds=talker_lm_input, position_ids=position_ids)
+        outputs, _ , _ = self.model(input_embeds=talker_lm_input, position_ids=position_ids)
         return outputs
 
- 
+class RungeKutta4ODESolver:
+    def __init__(self, function, initial_value):
+        self.function = function
+        self.initial_value = initial_value
+
+        self._one_third = 1 / 3
+        self._two_thirds = 2 / 3
+
+    def _rk4_step(self, function, time_start, time_step, time_end, value_start, function_value_start=None):
+        k1 = function_value_start if function_value_start is not None else function(time_start, value_start)
+        k2 = function(time_start + time_step * self._one_third, value_start + time_step * k1 * self._one_third)
+        k3 = function(time_start + time_step * self._two_thirds, value_start + time_step * (k2 - k1 * self._one_third))
+        k4 = function(time_end, value_start + time_step * (k1 - k2 + k3))
+        return (k1 + 3 * (k2 + k3) + k4) * time_step / 8
+
+    def _compute_step(self, function, time_start, time_step, time_end, value_start):
+        function_value_start = function(time_start, value_start)
+        return self._rk4_step(
+            function, time_start, time_step, time_end, value_start, function_value_start=function_value_start
+        ), function_value_start
+
+    def _linear_interpolation(self, time_start, time_end, value_start, value_end, time_point):
+        if time_point == time_start:
+            return value_start
+        if time_point == time_end:
+            return value_end
+        weight = (time_point - time_start) / (time_end - time_start)
+        return value_start + weight * (value_end - value_start)
+
+    def integrate(self, time_points):
+        solution = torch.empty(
+            len(time_points),
+            *self.initial_value.shape,
+            dtype=self.initial_value.dtype,
+            device=self.initial_value.device,
+        )
+        solution[0] = self.initial_value
+
+        current_index = 1
+        current_value = self.initial_value
+        for time_start, time_end in zip(time_points[:-1], time_points[1:]):
+            time_step = time_end - time_start
+            delta_value, _ = self._compute_step(self.function, time_start, time_step, time_end, current_value)
+            next_value = current_value + delta_value
+
+            while current_index < len(time_points) and time_end >= time_points[current_index]:
+                solution[current_index] = self._linear_interpolation(
+                    time_start, time_end, current_value, next_value, time_points[current_index]
+                )
+                current_index += 1
+
+            current_value = next_value
+
+        return solution
+
+class Qwen2_5OmniToken2WavDiTModel_AxInfer:
+    def __init__(self, config, run_dynamic=False):
+        self.model = AxModelInfer("token2wav_dit.onnx", run_dynamic)
+        self.mel_dim = config.mel_dim
+        self.repeats = config.repeats
+
+    def forward_onnx(self,
+        x,  # nosied input audio
+        cond,  # masked cond audio
+        spk,  # spk embedding
+        code,  # code
+        time,  # time step  # noqa: F821 F722
+        ):
+
+        
+        inputs = {"x":x.cpu().numpy(), "cond":cond.cpu().numpy(), "spk":spk.cpu().numpy(), "code":code.cpu().numpy(), "time":time.repeat(x.shape[0]).cpu().numpy()}
+        out = self.model( inputs)[0]
+        out = torch.from_numpy(out).to(x.device)
+        return out 
+
+    @torch.no_grad()
+    def sample(
+        self,
+        cond,
+        ref_mel,
+        code,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
+    ):
+        y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
+        max_duration = code.shape[1] * self.repeats
+        y0 = y_all[:, :max_duration].to(code.device)
+        batch = ref_mel.shape[0]
+        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)
+        assert batch == 1, "only support batch size = 1 currently"
+
+        def fn(t, x):
+            if guidance_scale < 1e-5:
+                pred = self.forward_onnx(x=x, spk=cond, cond=ref_mel, code=code, time=t)
+                return pred
+
+            out_put = self.forward_onnx(x=x, code=code, spk=cond, cond=ref_mel, time=t, )
+            pred, null_pred = torch.chunk(out_put, 2, dim=0)
+
+            return pred + (pred - null_pred) * guidance_scale
+
+        t_start = 0
+        t = torch.linspace(t_start, 1, num_steps, device=code.device, dtype=cond.dtype)
+        if sway_coefficient is not None:
+            t = t + sway_coefficient * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        solver = RungeKutta4ODESolver(function=fn, initial_value=y0)
+        trajectory = solver.integrate(t)
+
+        generated = trajectory[-1]
+        generated_mel_spec = generated.permute(0, 2, 1)
+        return generated_mel_spec
+
+class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
+    def __init__(self, config, run_dynamic=False):
+        self.model = AxModelInfer("token2wav_bigvgan.onnx", run_dynamic)
+
+    def __call__(self, apm_mel):
+        import time
+        t1 = time.time()
+        inputs = {"apm_mel":apm_mel.cpu().numpy()}
+        out = self.model( inputs)[0]
+        t2 = time.time()
+        print("Qwen2_5OmniToken2WavBigVGANModel Onnx infer time", t2-t1)
+        out = torch.from_numpy(out).to(apm_mel.device)
+        return out 
+
+class Qwen2_5OmniToken2WavModel_AxInfer:
+    def __init__(self, config, run_dynamic=False):
+        self.code2wav_dit_model = Qwen2_5OmniToken2WavDiTModel_AxInfer(config.dit_config, run_dynamic)
+        self.code2wav_bigvgan_model = Qwen2_5OmniToken2WavBigVGANModel_AxInfer(config.bigvgan_config, run_dynamic)
+
+    def __call__(
+        self,
+        code,
+        conditioning,
+        reference_mel,
+        num_steps=10,
+        guidance_scale=0.5,
+        sway_coefficient=-1.0,
+    ):
+        """Generates a waveform from input code and conditioning parameters."""
+
+        mel_spectrogram = self.code2wav_dit_model.sample(
+            conditioning,
+            reference_mel,
+            code,
+            num_steps=num_steps,
+            guidance_scale=guidance_scale,
+            sway_coefficient=sway_coefficient,
+        )
+
+        waveform = self.code2wav_bigvgan_model(mel_spectrogram)
+        return waveform
+
 class Qwen2_5OmniModel_AXInfer:
     def __init__(self, config, max_len_talker_generate_codes=600, run_dynamic=False, enable_audio_output=True):
         self.config = config
@@ -1118,14 +1273,14 @@ class Qwen2_5OmniModel_AXInfer:
         self.has_talker = enable_audio_output
         self.speaker_map = {}
         if enable_audio_output:
-            self.enable_talker()
+            self.enable_talker(run_dynamic)
             self.load_speakers("../../Qwen2.5-Omni-3B/spk_dict.pt")
 
         self.max_len_talker_generate_codes = max_len_talker_generate_codes
 
-    def enable_talker(self):
-        self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(self.config.talker_config)
-        self.token2wav = Qwen2_5OmniToken2WavModel_Export(self.config.token2wav_config) 
+    def enable_talker(self, run_dynamic):
+        self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(self.config.talker_config, run_dynamic)
+        self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(self.config.token2wav_config, run_dynamic) 
         self.has_talker = True
 
     def load_speakers(self, path):
@@ -1217,9 +1372,9 @@ class Qwen2_5OmniModel_AXInfer:
         
         wav = self.token2wav(
             padded_talker_generate_codes,
-            conditioning=speaker_params["cond"].to(self.token2wav.device).float(),
-            reference_mel=speaker_params["ref_mel"].to(self.token2wav.device).float(),
+            conditioning=speaker_params["cond"].float(),
+            reference_mel=speaker_params["ref_mel"].float(),
         )
         wav = wav[0:effictive_len*480]
         print("wav",wav.shape)
-        return thinker_result.sequences, wav.float()
+        return thinker_result, wav.float()
