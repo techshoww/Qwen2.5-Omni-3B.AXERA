@@ -8,6 +8,7 @@ import torch
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", type=str, help="input model path", required=True)
+    parser.add_argument("--key", default=None, help="embed_tokens key", required=False)
     parser.add_argument("--output_path", type=str, help="embed output path", required=False)
 
     args = parser.parse_args()
@@ -37,19 +38,26 @@ if __name__ == '__main__':
         for file in sf_files:
             find = False
             with safetensors.safe_open(file, "pt", device="cpu") as f:
-                for k in f.keys():
-                    if k in ["model.embed_tokens.weight",
-                                "llm.model.embed_tokens.weight",
-                                "language_model.model.embed_tokens.weight",
-                                "embed_tokens.weight", 
-                                "model.text_model.embed_tokens.weight",
-                                "thinker.model.embed_tokens.weight",
-                                "talker.model.embed_tokens.weight"]:
-                        #
-                        print(f"find {k} in {file.as_posix()}")
-                        res = f.get_tensor(k).to(torch.float32).numpy()
+                if args.key is not None:
+                    if args.key in f.keys():
+                        res = f.get_tensor(args.key).to(torch.float32).numpy()
                         np.save(output_path / f"model.embed_tokens.weight.npy", res)
                         find = True
                         break
+                else:
+                    for k in f.keys():
+                        if k in ["model.embed_tokens.weight",
+                                    "llm.model.embed_tokens.weight",
+                                    "language_model.model.embed_tokens.weight",
+                                    "embed_tokens.weight", 
+                                    "model.text_model.embed_tokens.weight",
+                                    "thinker.model.embed_tokens.weight",
+                                    "talker.model.embed_tokens.weight"]:
+                            #
+                            print(f"find {k} in {file.as_posix()}")
+                            res = f.get_tensor(k).to(torch.float32).numpy()
+                            np.save(output_path / f"model.embed_tokens.weight.npy", res)
+                            find = True
+                            break
             if find:
                 break
