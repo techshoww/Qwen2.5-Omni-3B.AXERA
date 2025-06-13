@@ -1,6 +1,6 @@
 from qwen_omni_utils import process_mm_info
 import torch
-from transformers import  Qwen2_5OmniProcessor
+from transformers import  Qwen2_5OmniProcessor, AutoConfig
 # from modeling_export import Qwen2_5OmniModel_Export
 from modeling_qwen2_5_omni_axinfer import Qwen2_5OmniForConditionalGeneration_AxInfer
 import librosa
@@ -9,6 +9,8 @@ import soundfile as sf
 from preprocess import Qwen2VLImageProcessorExport
 from transformers.image_utils import PILImageResampling
 import numpy as np
+
+device = torch.device("cpu")
 # @title inference function
 def inference(video_path):
     messages = [
@@ -29,11 +31,11 @@ def inference(video_path):
     # image_inputs, video_inputs = process_vision_info([messages])
     audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
     inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True, use_audio_in_video=True, min_pixels=308*308, max_pixel=308*308)
-    inputs = inputs.to(model.device).to(model.dtype)
+    # inputs = inputs.to(device).to(model.dtype)
     print("videos",videos[0].shape)
     print('pixel_values_videos', inputs['pixel_values_videos'].shape)
-    np.save("input_ids_0428.npy", inputs['input_ids'].cpu().numpy())
-    np.save("pixel_values_videos_0428.npy",  inputs["pixel_values_videos"].float().view(2,484,3,392).permute(0,2,1,3).cpu().numpy())
+    # np.save("input_ids_0428.npy", inputs['input_ids'].cpu().numpy())
+    # np.save("pixel_values_videos_0428.npy",  inputs["pixel_values_videos"].float().view(2,484,3,392).permute(0,2,1,3).cpu().numpy())
     # inputs["pixel_values_videos"] = inputs["pixel_values_videos"].view(2,484,3,392).permute(0,2,1,3)
 
     img_processor = Qwen2VLImageProcessorExport(max_pixels=308*308, patch_size=14, temporal_patch_size=2, merge_size=2)
@@ -56,14 +58,14 @@ def inference(video_path):
 
     t,seq_len,tpp,_ = pixel_values.shape
 
-    pixel_values = torch.from_numpy(pixel_values).to(model.device)
+    pixel_values = torch.from_numpy(pixel_values).to(device)
     mean = torch.tensor(image_mean,dtype=torch.float32).reshape([1,1,1,3])*255
-    mean = mean.to(model.device)
+    mean = mean.to(device)
     std = torch.tensor(image_std,dtype=torch.float32).reshape([1,1,1,3])*255
-    std = std.to(model.device)
+    std = std.to(device)
     pixel_values = (pixel_values-mean)/std
 
-    pixel_values = pixel_values.permute(0,3,1,2).to(model.device)
+    pixel_values = pixel_values.permute(0,3,1,2).to(device)
 
     inputs["pixel_values_videos"] = pixel_values
 
@@ -75,16 +77,22 @@ def inference(video_path):
     return text
 
 
-device = torch.device("cpu")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+
+model_path = "../../Qwen2.5-Omni-3B"
+# config = AutoConfig.from_pretrained(model_path)
+  
+# model = Qwen2_5OmniForConditionalGeneration_AxInfer(
+#     config,
+#     "../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/",
+#     prefill_len=352, lastN=1023, run_dynamic=True
+# )
+
 model = Qwen2_5OmniForConditionalGeneration_AxInfer.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,
     device_map=device,
 )
-model.init_upsampler_downsampler()
-model.thinker.audio_tower.forward = model.thinker.audio_tower.forward_onnx
-model.thinker.visual.forward = model.thinker.visual.forward_onnx_by_second_nchw
+
 # model.token2wav.code2wav_dit_model.sample = model.token2wav.code2wav_dit_model.sample_onnx
 # print("model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data",model.token2wav.code2wav_bigvgan_model.resblocks[0].activations[0].downsample.conv.weight.data.shape)
 processor = Qwen2_5OmniProcessor.from_pretrained(model_path)

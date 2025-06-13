@@ -94,7 +94,7 @@ class PostLayer:
     def __call__(self, hidden_states, is_prefill):
         hidden_states = hidden_states.cpu().numpy().astype(self.data_type)
         if is_prefill:
-            x = np.zeros(hidden_states.shape[0], self.prefill_len, hidden_states.shape[2] , dtype=self.data_type)
+            x = np.zeros((hidden_states.shape[0], self.prefill_len, hidden_states.shape[2]) , dtype=self.data_type)
             x += hidden_states
         else:
             x = hidden_states

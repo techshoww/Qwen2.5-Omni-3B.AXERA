@@ -78,8 +78,8 @@ if is_torch_flex_attn_available():
 
 if is_flash_attn_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
-
-
+from itertools import accumulate
+import operator
 logger = logging.get_logger(__name__)
 
 
@@ -111,6 +111,10 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
         self.model = AxModelInfer(axmodel_path, run_dynamic=run_dynamic)
         self.n_window = config.n_window
         self.dtype = torch.bfloat16
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cpu")
 
     def padded_and_mask_function_maxlen(
         self, tensor_list, tensor_len, max_len, padding_value=0, padding_side="right"
@@ -280,6 +284,10 @@ class Qwen2_5OmniVisionEncoder_AXInfer:
         self.fullatt_block_indexes = config.fullatt_block_indexes
         self.window_size = config.window_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
+    
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cpu")
 
     def __call__(
         self, hidden_states: torch.Tensor, grid_thw: torch.Tensor
@@ -505,9 +513,9 @@ class Qwen2_5OmniPreTrainedModelForConditionalGeneration(Qwen2_5OmniPreTrainedMo
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
         spatial_merge_size = self.spatial_merge_size
-        image_token_id = self.config.image_token_id
-        video_token_id = self.config.video_token_id
-        audio_token_id = self.config.audio_token_id
+        image_token_id = self.config.image_token_index
+        video_token_id = self.config.video_token_index
+        audio_token_id = self.config.audio_token_index
         vision_start_token_id = self.config.vision_start_token_id
         audio_start_token_id = self.config.audio_start_token_id
         position_id_per_seconds = self.config.position_id_per_seconds
@@ -927,16 +935,17 @@ class Qwen2_5OmniThinkerTextModel_AxInfer(Qwen2_5OmniPreTrainedModel):
             #     f"{model_dir}/{model_name}_p{prefill_len}_l{i}_together.AxModel"
             # )
             session = LMLayer(
+                config,
                 f"{axmodel_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel",
                 prefill_len,
-                hidden_size=config.hidden_size
+                lastN=lastN,
                 run_dynamic=run_dynamic,
                 data_type=bfloat16
             )
             self.layers.append(session)
 
         
-        self.norm = PostLayer(f"{axmodel_dir}/norm_prefill_{prefill_len}.onnx", f"{axmodel_dir}/norm_decode.onnx", prefill_len,  run_dynamic=True, data_type=np.float32)
+        self.norm = PostLayer(f"{axmodel_dir}/norm_prefill_{prefill_len}.onnx", f"{axmodel_dir}/norm_decode.onnx", prefill_len,  run_dynamic=run_dynamic, data_type=np.float32)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1289,15 +1298,19 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AxInfer(Qwen2_5OmniPreTrainedMo
 
         self.vocab_size = config.text_config.vocab_size
         self.model = Qwen2_5OmniThinkerTextModel_AxInfer(
-            config.text_config, axmodel_dir, prefill_len=prefill_len, lastN=lastN, run_dynamic
+            config.text_config, axmodel_dir, prefill_len=prefill_len, lastN=lastN, run_dynamic=run_dynamic
         )
         
-        self.lm_head = PostLayer(f"{axmodel_dir}/lm_head_prefill_{prefill_len}.onnx", f"{axmodel_dir}/lm_head_decode.onnx", prefill_len,  run_dynamic=True, data_type=np.float32)
+        self.lm_head = PostLayer(f"{axmodel_dir}/lm_head_prefill_{prefill_len}.onnx", f"{axmodel_dir}/lm_head_decode.onnx", prefill_len,  run_dynamic=run_dynamic, data_type=np.float32)
 
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self.spatial_merge_size = config.vision_config.spatial_merge_size
         self.rope_deltas = None
         self.post_init()
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cpu")
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
@@ -3398,10 +3411,13 @@ class Qwen2_5OmniForConditionalGeneration_AxInfer(Qwen2_5OmniPreTrainedModel, Ge
     def __init__(self, config):
         super().__init__(config)
 
-        self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AxInfer(config.thinker_config, axmodel_dir="../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/", prefill_len=352, lastN=1023, run_dynamic=True)
+        self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AxInfer(
+                config.thinker_config, 
+                "../../Qwen2.5-Omni-3B-AX650N-prefill352/",
+                prefill_len=352, lastN=1023, run_dynamic=True)
 
         # self.has_talker = config.enable_audio_output
-        # self.speaker_map = {}
+        self.speaker_map = {}
         # if config.enable_audio_output:
         #     self.enable_talker()
         # self.post_init()
