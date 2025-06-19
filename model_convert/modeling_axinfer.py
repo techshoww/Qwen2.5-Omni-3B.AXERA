@@ -660,7 +660,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
         else:
             assert False
 
-        outputs = self.model(input_embeds=talker_lm_input, position_ids=position_ids)
+        outputs = self.model(input_embeds=talker_lm_input, position_ids=position_ids, thinker_reply_part=thinker_reply_part)
         return outputs
 
 
@@ -808,7 +808,7 @@ class Qwen2_5OmniModel_AXInfer:
 
     def enable_talker(self, run_dynamic):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(
-            self.config.talker_config, run_dynamic
+            self.config.talker_config, False
         )
         self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(
             self.config.token2wav_config, run_dynamic

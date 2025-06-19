@@ -83,6 +83,58 @@ class AxModelInfer:
 
         return outputs
 
+class NormLayer:
+    def __init__(self,  axmodel_path, prefill_len,  run_dynamic=False, data_type=bfloat16):
+        self.prefill_len = prefill_len
+        self.data_type = data_type
+        self.model = AxModelInfer(axmodel_path, run_dynamic=run_dynamic)
+       
+    def __call__(self, hidden_states, is_prefill):
+        hidden_states = hidden_states.cpu().numpy().astype(self.data_type)
+        if is_prefill:
+            token_len = hidden_states.shape[1]
+            x = np.zeros((hidden_states.shape[0], self.prefill_len, hidden_states.shape[2]) , dtype=self.data_type)
+            x[:, 0:token_len] = hidden_states
+        else:
+            x = hidden_states
+        input_feed = {
+            "input": x
+        }
+
+        if is_prefill:
+            output = self.model(input_feed, shape_group=1)[0][:,0:token_len]
+        else:
+            output = self.model(input_feed, shape_group=0)[0]
+
+        output = torch.from_numpy(output.astype(np.float32))
+        return output
+
+class LMHead:
+    def __init__(self,  axmodel_path, prefill_len,  run_dynamic=False, data_type=bfloat16):
+        self.prefill_len = prefill_len
+        self.data_type = data_type
+        self.model = AxModelInfer(axmodel_path, run_dynamic=run_dynamic)
+       
+    def __call__(self, hidden_states, is_prefill):
+        hidden_states = hidden_states.cpu().numpy().astype(self.data_type)
+        if is_prefill:
+            token_len = hidden_states.shape[1]
+            x = np.zeros((hidden_states.shape[0], self.prefill_len, hidden_states.shape[2]) , dtype=self.data_type)
+            x[:, 0:token_len] = hidden_states
+        else:
+            x = hidden_states
+        input_feed = {
+            "input": x
+        }
+
+        if is_prefill:
+            output = self.model(input_feed, shape_group=1)[1][:,0:token_len]
+        else:
+            output = self.model(input_feed, shape_group=0)[1]
+
+        output = torch.from_numpy(output.astype(np.float32))
+        return output
+        
 class PostLayer:
     def __init__(self,  axmodel_path_prefill, axmodel_path_decode, prefill_len,  run_dynamic=False, data_type=bfloat16):
         self.prefill_len = prefill_len
@@ -94,8 +146,9 @@ class PostLayer:
     def __call__(self, hidden_states, is_prefill):
         hidden_states = hidden_states.cpu().numpy().astype(self.data_type)
         if is_prefill:
+            token_len = hidden_states.shape[1]
             x = np.zeros((hidden_states.shape[0], self.prefill_len, hidden_states.shape[2]) , dtype=self.data_type)
-            x += hidden_states
+            x[:, 0:token_len] = hidden_states
         else:
             x = hidden_states
         input_feed = {
@@ -103,11 +156,11 @@ class PostLayer:
         }
 
         if is_prefill:
-            output = self.model_prefill(input_feed)
+            output = self.model_prefill(input_feed)[0][:,0:token_len]
         else:
-            output = self.model_decode(input_feed)
+            output = self.model_decode(input_feed)[0]
 
-        output = torch.from_numpy(output[0].astype(np.float32))
+        output = torch.from_numpy(output.astype(np.float32))
         return output
 
 class LMLayer:
@@ -127,25 +180,44 @@ class LMLayer:
         self.cache_idx = 0
         self.model = AxModelInfer(axmodel_path, run_dynamic)
 
-    def __call__(self, input_embeds, attention_mask, position_ids,  is_prefill=None):
+        self.mask = np.zeros((1, 1, self.lastN + 1), dtype=np.float32).astype(bfloat16)
+        self.mask[:, :, : self.lastN] -= 65536
+
+    def __call__(self, input_embeds,  position_ids,  is_prefill=None):
 
         assert is_prefill is not None 
 
-        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(self.data_type)
-        token_len = input_embeds.shape[1]
-        data[:, 0:token_len] = input_embeds.cpu().numpy().astype(self.data_type)
+        if is_prefill:
+            data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(self.data_type)
+            token_len = input_embeds.shape[1]
+            data[:, 0:token_len] = input_embeds.cpu().numpy().astype(self.data_type)
 
-        mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
-        mask[:, 0:token_len, 0:token_len] = attention_mask
-        mask = mask.astype(bfloat16)
+            mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
+            # mask[:, 0:token_len, 0:token_len] = attention_mask
+            for i in range(token_len):
+                mask[:, i, : i + 1] = 0
+            mask = mask.astype(bfloat16)
 
-        past_k = np.zeros((1, 1, self.hidden_size), dtype=self.data_type) if is_prefill else self.k_cache
-        past_v = np.zeros((1, 1, self.hidden_size), dtype=self.data_type) if is_prefill else self.v_cache
+            past_k = np.zeros((1, 1, self.hidden_size), dtype=self.data_type) if is_prefill else self.k_cache
+            past_v = np.zeros((1, 1, self.hidden_size), dtype=self.data_type) if is_prefill else self.v_cache
+
+            indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
+            indices[:, 0:token_len] = position_ids.squeeze(1).cpu().numpy().astype(np.uint32)
+        else:
+            # print("decode self.cache_idx(start_indice)",self.cache_idx)
+            data = input_embeds.cpu().numpy().astype(self.data_type)
+           
+            mask = self.mask
+
+            past_k = self.k_cache
+            past_v = self.v_cache
+            assert torch.equal(position_ids[0], position_ids[1]) and torch.equal(position_ids[0], position_ids[2])
+            indices = position_ids[0:1].squeeze(1).cpu().numpy().astype(np.uint32)
 
         input_feed = {
             "K_cache": past_k,
             "V_cache": past_v,
-            "indices": position_ids.squeeze(1).cpu().numpy().astype(np.uint32),
+            "indices": indices,
             "input": data,
             "mask": mask
         }
@@ -158,10 +230,13 @@ class LMLayer:
             self.k_cache[:,0:token_len] = outputs[0][:, 0:token_len]
             self.v_cache[:,0:token_len] = outputs[1][:, 0:token_len]
             self.cache_idx = token_len 
+            self.mask[:, :, :token_len] = 0
         else:
             hidden_states = outputs[2]
             self.k_cache[:, self.cache_idx] = outputs[0]
             self.v_cache[:, self.cache_idx] = outputs[1]
+            self.mask[:, :, :self.cache_idx ] = 0
+
             self.cache_idx += 1
 
         return torch.from_numpy(hidden_states.astype(np.float32))

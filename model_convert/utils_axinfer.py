@@ -247,16 +247,17 @@ class AxLMInfer:
         )
 
     def embed_tokens(self, input_ids):
-        # return np.take(self.embeds, input_ids, axis=0)
-        output = np.take(self.embeds, input_ids, axis=0)
-        output = self.thinker_to_talker_proj({"input": output})[0]
-        return output
+        return np.take(self.embeds, input_ids, axis=0)
+        # output = np.take(self.embeds, input_ids, axis=0)
+        # output = self.thinker_to_talker_proj({"input": output})[0]
+        # return output
 
     def __call__(
         self,
         input_ids=None,
         input_embeds=None,
         position_ids=None,
+        thinker_reply_part=None
     ):
 
         if (input_ids is None) ^ (input_embeds is not None):
@@ -270,8 +271,9 @@ class AxLMInfer:
             # with open("talker_input_ids", "rb") as f:
             #     talker_input_ids = dill.load(f)
             # input_ids = talker_input_ids.int().reshape(-1).tolist()
-        if input_embeds is None:
-            input_embeds = self.embed_tokens(input_ids)
+        # if input_embeds is None:
+            # input_embeds = self.embed_tokens(input_ids)
+        assert input_embeds is not None
 
         hidden_states = input_embeds
 
@@ -329,7 +331,6 @@ class AxLMInfer:
         next_token, posssible_tokens, possible_soft = post_process(input_ids[prompt_ignore_length:], post_out, topk=40, topp=0.8, temperature=0.9, repetition_penalty=1.1, suppress_tokens=[8293])
         input_ids.append(next_token)
         print("prefill done!")
-
         # set to decoder
 
         start_ids = np.max(indices) + 1
@@ -345,11 +346,14 @@ class AxLMInfer:
             next_token = input_ids[start_indice]
             indices = np.array([start_ids], np.uint32).reshape((1, 1))
             start_ids += 1
-            data = (
-                self.embed_tokens( np.array([next_token]).reshape(1,1) )
-                .reshape((1, 1, self.hidden_size))
-                .astype(np.float32)
-            )
+
+            codec_embeds = self.embed_tokens( np.array([next_token])).reshape(1,1,-1)
+            inputs_embeds = codec_embeds + thinker_reply_part[:, :1, :].numpy()
+            if thinker_reply_part.shape[1] > 1:
+                thinker_reply_part = thinker_reply_part[:, 1:, :]
+            inputs_embeds = self.thinker_to_talker_proj({"input": inputs_embeds})[0]
+
+            data = inputs_embeds
             
             print("--------------------------------------indices", indices, "next_token", next_token)
             for i in range(self.cfg.num_hidden_layers):

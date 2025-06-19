@@ -65,16 +65,15 @@ def inference(video_path):
     std = std.to(device)
     pixel_values = (pixel_values-mean)/std
 
-    pixel_values = pixel_values.permute(0,3,1,2).to(device)
+    # pixel_values = pixel_values.permute(0,3,1,2).to(device)
 
     inputs["pixel_values_videos"] = pixel_values
 
-    # text_ids, audio = model.generate(**inputs, use_audio_in_video=True, return_audio=True)
-    text_ids = model.generate(**inputs, use_audio_in_video=True, return_audio=False)
+    text_ids, audio = model.generate(**inputs, use_audio_in_video=True, return_audio=False)
 
     text = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
    
-    return text
+    return text, audio
 
 
 
@@ -102,7 +101,7 @@ video_path = "2.mp4"
 # video_path="demo.mp4"
 
 ## Use a local HuggingFace model to inference.
-response,   = inference(video_path)
+response, audio  = inference(video_path)
 print(response[0])
 # sf.write(
 #     "output.wav",
