@@ -25,225 +25,13 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
     Qwen2_5OmniVisionEncoder, Qwen2_5OmniVisionSdpaAttention,
     RungeKutta4ODESolver, apply_rotary_pos_emb_vision, kaiser_sinc_filter1d)
 from utils import get_chunked_index, get_llm_pos_ids_for_vision, get_rope_index
-from utils_axinfer import AxLMInfer, AxModelInfer
-
-
-
-
-class AxLanguageModelInfer:
-    def __init__(
-        self, cfg, mode_dir, model_name, prefill_len, lastN, run_dynamic=False
-    ):
-
-        # model_name="qwen2_5_omni_text"
-        self.cfg = cfg
-        self.prefill_len = prefill_len
-
-        self.num_hidden_layers = self.cfg.num_hidden_layers
-        self.hidden_size = self.cfg.hidden_size
-
-        self.prefill_decoder_sessins = []
-        for i in range(self.num_hidden_layers):
-            # session = InferenceSession(
-            #     f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel"
-            # )
-            session = AxModelInfer(
-                f"{mode_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel",
-                run_dynamic,
-            )
-            self.prefill_decoder_sessins.append(session)
-        # self.post_process_session = InferenceSession(
-        #     f"{mode_dir}/{model_name}_post.axmodel"
-        # )
-        self.post_process_session = AxModelInfer(
-            f"{mode_dir}/{model_name}_post.axmodel", run_dynamic
-        )
-        self.embeds = np.load(f"{mode_dir}/model.embed_tokens.weight.npy")
-        self.tokenizer = AutoTokenizer.from_pretrained(mode_dir, trust_remote_code=True)
-        self.lastN = lastN
-
-    def post_process(self, data, topk=1, topp=0.001, temperature=0.1):
-        def top_p(l: np.ndarray, p: float) -> np.ndarray:
-            index = np.argsort(l)
-            res = l.copy()
-            sum_p = 0
-            for i in index[::-1]:
-                if sum_p >= p:
-                    res[i] = 0
-                sum_p += res[i]
-            return res / sum_p
-
-        def softmax(l: np.ndarray) -> np.ndarray:
-            l_max = l - l.max()
-            l_exp = np.exp(l_max)
-            res = l_exp / np.sum(l_exp)
-            return res.astype(np.float64)
-
-        r = data.astype(np.float32)
-        r = r.flatten()
-        # topk
-        candidate_index = np.argpartition(r, -topk)[-topk:]
-        candidate_value = r[candidate_index]
-        # temperature
-        candidate_value /= temperature
-        # softmax
-        candidate_soft = softmax(candidate_value)
-        # topp
-        candidate_soft = top_p(candidate_soft, topp)
-        candidate_soft = candidate_soft.astype(np.float64) / candidate_soft.sum()
-        pos = np.random.multinomial(1, candidate_soft).argmax()
-        next_token = candidate_index[pos]
-        return next_token, candidate_index, candidate_soft
-
-    def __call__(self, token_ids, prefill_data, position_ids):
-
-        kv_dim = (
-            self.cfg.hidden_size
-            // self.cfg.num_attention_heads
-            * self.cfg.num_key_value_heads
-        )
-        k_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
-            for _ in range(self.cfg.num_hidden_layers)
-        ]
-        v_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
-            for _ in range(self.cfg.num_hidden_layers)
-        ]
-
-        # token_ids = input_ids.squeeze().tolist()
-
-        # prefill_data = np.take(self.embeds, token_ids, axis=0)
-        # prefill_data = prefill_data.astype(bfloat16)
-
-        # image_start_index = np.where(np.array(token_ids) == start_token_id)[0].tolist()[0]
-        # print(0)
-        # image_insert_index = image_start_index + 1
-
-        # prefill_data[ image_insert_index : image_insert_index + vit_output.shape[1]] = vit_output[0, :, :]
-        print("prefill_data.shape", prefill_data.shape)
-        token_len = prefill_data.shape[1]
-
-        indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
-        prompt_ignore_length = token_len
-
-        indices[:, 0:token_len] = position_ids.squeeze(1).astype(np.uint32)
-        mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
-        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(bfloat16)
-        thinker_token_embeds = []
-        thinker_hidden_states = []
-        
-        print("prefill_data",prefill_data)
-        data[:, 0:token_len] = prefill_data.numpy().astype(bfloat16)
-        thinker_token_embeds.append(prefill_data.numpy())
-        for i in range(token_len):
-            mask[:, i, : i + 1] = 0
-
-        mask = mask.astype(bfloat16)
-        for i in range(self.num_hidden_layers):
-            input_feed = {
-                "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
-                "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
-                "indices": indices,
-                "input": data,
-                "mask": mask,
-            }
-            outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
-
-            k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
-            v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
-            data[:, 0:token_len] = outputs[2][:, :token_len, :]
-
-        # _, post_out = self.post_process_session(
-        #     {"input": data[:, token_len - 1 : token_len, :]}
-        # )
-        print("prefill ht before norm",data[:, 0:token_len])
-        post_out = self.post_process_session(
-            {"input": data[:, token_len - 1 : token_len, :]}
-        )[1]
-
-        post_norm = []
-        for ti in range(token_len):
-
-            # pn, _ = self.post_process_session({"input": data[:, ti : ti + 1, :]})
-            pn = self.post_process_session({"input": data[:, ti : ti + 1, :]})[0]
-
-            post_norm.append(pn)
-           
-        post_norm = np.concatenate(post_norm, axis=1)
-        print("prefill norm hidden_states",post_norm)
-    
-        thinker_hidden_states.append(post_norm)
-        next_token, posssible_tokens, possible_soft = self.post_process( post_out, topk=1)
-        # posibles = [self.tokenizer.decode([t]) for t in posssible_tokens]
-        # posible_soft = [str((t, s)) for t, s in zip(posibles, possible_soft)]
-        token_ids.append(next_token)
-        # print("posibles", posibles)
-        # print(self.tokenizer.decode(token_ids[-1:]))
-        # print("prefill done!")
-
-        # set to decoder
-
-        start_ids = np.max(indices) + 1
-        mask = np.zeros((1, 1, self.lastN + 1), dtype=np.float32).astype(bfloat16)
-        mask[:, :, : self.lastN] -= 65536
-        mask[:, :, :token_len] = 0
-        for start_indice in range(np.max(indices) + 1, self.lastN + 1):
-
-            if self.prefill_len > 0 and start_indice < token_len:
-                continue
-            next_token = token_ids[start_indice]
-            indices = np.array([start_ids], np.uint32).reshape((1, 1))
-            start_ids += 1
-            data = (
-                self.embeds[next_token, :]
-                .reshape((1, 1, self.hidden_size))
-                .astype(bfloat16)
-            )
-            thinker_token_embeds.append(data)
-            # print("indices", indices)
-            for i in range(self.cfg.num_hidden_layers):
-                # print("decode layer:",i)
-                input_feed = {
-                    "K_cache": k_caches[i],
-                    "V_cache": v_caches[i],
-                    "indices": indices,
-                    "input": data,
-                    "mask": mask,
-                }
-
-                outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=0)
-
-                k_caches[i][:, start_indice, :] = outputs[0][:, :, :]
-                v_caches[i][:, start_indice, :] = outputs[1][:, :, :]
-                data = outputs[2]
-            mask[..., start_indice] = 0
-            if start_indice < token_len - 1:
-                pass
-            else:
-
-                post_norm, post_out = self.post_process_session({"input": data})
-                thinker_hidden_states.append(post_norm)
-                
-                next_token, posssible_tokens, possible_soft = self.post_process( post_out)
-                token_ids.append(next_token)
-                print(self.tokenizer.decode(token_ids[-1:]))
-            if next_token == self.tokenizer.eos_token_id:
-                # print("hit eos!")
-                break
-        
-        return (
-            self.tokenizer.decode(token_ids[token_len:]),
-            token_ids[token_len:],
-            thinker_token_embeds,
-            thinker_hidden_states,
-        )
-
+from utils_axinfer import AxModelInfer
+from utils_lm import Qwen2_5OmniTalkerModel_AXInfer, Qwen2_5OmniThinkerTextModel_AXInfer
 
 class Qwen2_5OmniAudioEncoder_AXInfer:
-    def __init__(self, config, axmodel_path):
+    def __init__(self, config, axmodel_path, run_dynamic=False):
         self.config = config
-        self.model = AxModelInfer(axmodel_path)
+        self.model = AxModelInfer(axmodel_path, run_dynamic)
         self.n_window = config.n_window
         self.dtype = torch.bfloat16
 
@@ -303,26 +91,24 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
     ):
 
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
-        print("chunk_num", chunk_num)
+        
         chunk_lengths = torch.tensor(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
         )
-        print("chunk_lengths", chunk_lengths)
+        
         tail_chunk_index = list(
             accumulate(chunk_num.tolist(), func=operator.add, initial=-1)
         )[1:]
         # tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        print("tail_chunk_index", tail_chunk_index)
+        
         chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
         chunk_lengths = torch.where(
             chunk_lengths == 0, self.n_window * 2, chunk_lengths
         )
 
         chunk_list = input_features.split(chunk_lengths.tolist(), dim=1)
-        print("chunk_lengths", chunk_lengths)
-        print("input_features", input_features.shape)
 
         padded_feature, padded_mask, padded_mask_after_cnn = (
             self.padded_and_mask_function_maxlen(
@@ -333,7 +119,7 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
                 padding_side="right",
             )
         )
-        print("padded_feature", padded_feature.shape)
+
         cu_seqlens = torch.cat(
             (
                 torch.zeros(1, device=padded_mask_after_cnn.device, dtype=torch.int32),
@@ -341,22 +127,12 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
             )
         ).to(torch.int32)
 
-        # print("padded_mask_after_cnn.sum()",padded_mask_after_cnn.sum())
-        # seq_length = padded_mask_after_cnn.sum().item()
         d0, _, d2 = padded_feature.shape
         padded_len = torch.tensor(
             d0 * d2, dtype=feature_lens.dtype, device=feature_lens.device
         )
         seq_len, _ = self._get_feat_extract_output_lengths(padded_len)
-        # attention_mask = torch.full(
-        #     [1, seq_len, seq_len],
-        #     -3.3895313892515355e+38,
-        #     device=padded_feature.device,
-        #     dtype=padded_feature.dtype,
-        # )
-        # for i in range(1, len(cu_seqlens)):
-        #     attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
-
+        
         attention_mask = torch.zeros(
             [1, seq_len, seq_len], device=padded_feature.device, dtype=torch.float32
         )
@@ -367,12 +143,6 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
                 cu_seqlens[i - 1] : cu_seqlens[i],
             ] = 1
 
-        # torch.save(attention_mask[:, 0:self.n_window, 0:self.n_window], "attention_mask.pth")
-        # torch.save(padded_feature[0:1], "padded_feature.pth")
-        # torch.save(padded_mask[0:1], "padded_mask.pth")
-        print("padded_mask.dtype", padded_mask.dtype)
-        print("padded_feature", padded_feature.dtype)
-        print("attention_mask", attention_mask.dtype)
         token_audio_list = []
         for di in range(d0):
             # print("padded_feature[di:di+1]",padded_feature[di:di+1].shape)
@@ -394,22 +164,20 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
             }
             token_audio = self.model(inputs)[0]
             token_audio = torch.from_numpy(token_audio)
-            # print("token_audio",token_audio.shape)
             token_audio_list.append(token_audio)
         token_audio = torch.cat(token_audio_list, 0)
-        # print("token_audio",token_audio.shape)
+        
         _, output_lens = self._get_feat_extract_output_lengths(feature_lens)
         output_lens = output_lens.item()
         token_audio = token_audio[0:output_lens]
-        # if not return_dict:
-        # return tuple(v for v in [token_audio, encoder_states, all_attentions] if v is not None)
+        
         return token_audio
 
 
 class Qwen2_5OmniVisionEncoder_AXInfer:
-    def __init__(self, config, axmodel_path):
+    def __init__(self, config, axmodel_path, run_dynamic=False):
         self.config = config
-        self.model = AxModelInfer(axmodel_path)
+        self.model = AxModelInfer(axmodel_path, run_dynamic)
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.fullatt_block_indexes = config.fullatt_block_indexes
@@ -431,7 +199,7 @@ class Qwen2_5OmniVisionEncoder_AXInfer:
         """
 
         t = hidden_states.shape[0]
-        print("h shape", hidden_states.shape)
+        
         outputs = []
         for ti in range(t):
             ht = hidden_states[ti : ti + 1]
@@ -447,35 +215,36 @@ class Qwen2_5OmniVisionEncoder_AXInfer:
 
 
 class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
-    def __init__(self, config: Qwen2_5OmniThinkerConfig, run_dynamic=False):
+    def __init__(self, config: Qwen2_5OmniThinkerConfig, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False):
 
         self.config = config
         self.audio_tower = Qwen2_5OmniAudioEncoder_AXInfer(
-            config.audio_config, "../audio_tower.axmodel"
+            config.audio_config, f"{model_dir}/audio_tower.axmodel", run_dynamic=True
         )
         self.visual = Qwen2_5OmniVisionEncoder_AXInfer(
-            config.vision_config, "../Qwen2.5-Omni-7B_vision.axmodel"
+            config.vision_config, f"{model_dir}/Qwen2.5-Omni-7B_vision.axmodel", run_dynamic=True
         )
-        self.text_model = AxLanguageModelInfer(
+        self.text_model = Qwen2_5OmniThinkerTextModel_AXInfer(
             config.text_config,
-            "../../Qwen2.5-Omni-3B-AX650N-prefill352/",
+            model_dir,
             "qwen2_5_omni_text",
-            352,
-            1023,
+            prefill_len,
+            lastN,
             run_dynamic,
+            lazy_load
         )
         self.processor = Qwen2_5OmniProcessor.from_pretrained(
-            "../../Qwen2.5-Omni-3B-AX650N-prefill352/"
+            model_dir
         )
 
     def __call__(self, messages):
-        print("start")
+        
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        print("text", text)
+        
         audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
-        print("609")
+       
         inputs = self.processor(
             text=text,
             audio=audios,
@@ -487,13 +256,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             min_pixels=308 * 308,
             max_pixel=308 * 308,
         )
-        # inputs.keys dict_keys(['input_ids', 'attention_mask', 'pixel_values_videos', 'video_grid_thw', 'video_second_per_grid', 'feature_attention_mask', 'input_features'])
-        print("inputs", inputs.keys())
+        
         inputs = inputs.to("cpu").to(torch.float32)
-        # pixel_values_videos = inputs.get("pixel_values_videos", None)
-
-        # pixel_values_videos = pixel_values_videos.view(2,484,3,392).permute(0,2,1,3) # NCHW for onnx
-        # pixel_values_videos = pixel_values_videos.view(2,484,3,392).permute(0,1,3,2)  # 2,484,392,3  NHWC for axmodel
+        
         img_processor = Qwen2VLImageProcessorExport(
             max_pixels=308 * 308, patch_size=14, temporal_patch_size=2, merge_size=2
         )
@@ -514,14 +279,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         t, seq_len, tpp, _ = pixel_values.shape
 
         pixel_values = torch.from_numpy(pixel_values)
-        # mean = torch.tensor(image_mean,dtype=torch.float32).reshape([1,1,1,3])*255
-
-        # std = torch.tensor(image_std,dtype=torch.float32).reshape([1,1,1,3])*255
-
-        # pixel_values = (pixel_values-mean)/std
-
-        # pixel_values = pixel_values.permute(0,3,1,2)
-
         pixel_values_videos = pixel_values
 
         input_ids = inputs["input_ids"]
@@ -529,7 +286,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         inputs_embeds = torch.from_numpy(inputs_embeds)
 
         input_features = inputs["input_features"]
-        print("input_features", input_features)
+        
         feature_attention_mask = inputs.get("feature_attention_mask", None)
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
@@ -569,7 +326,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             )
             inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
 
-            print("audio_features", audio_features)
             del audio_features
             del self.audio_tower
             gc.collect()
@@ -580,7 +336,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
 
         if pixel_values_videos is not None:
             video_embeds = self.visual(pixel_values_videos, video_grid_thw)
-            print("video_embeds", video_embeds)
 
             video_mask = (
                 (input_ids == self.config.video_token_index)
@@ -598,7 +353,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         use_audio_in_video = True
 
         second_per_grids = torch.ones(1)
-        # print("config", self.config)
+        
         position_ids, _ = get_rope_index(
             self.config,
             input_ids,
@@ -609,9 +364,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             audio_feature_lengths,
             second_per_grids,
         )
-        # print("position_ids", position_ids)
-        print("thinker text model input_ids", input_ids)
-        print("thinker text model inputs_embeds",inputs_embeds)
+        
         output, output_token_ids, thinker_token_embeds, thinker_hidden_states = (
             self.text_model(
                 input_ids[0].tolist(), inputs_embeds, position_ids.cpu().numpy()
@@ -628,18 +381,18 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
 
 
 class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
-    def __init__(self, cfg, run_dynamic=False):
+    def __init__(self, cfg, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False,):
 
-        model_dir = "../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/"
-        self.thinker_to_talker_proj_336 = AxModelInfer(
-            f"thinker_to_talker_proj_336.onnx"
+        self.thinker_to_talker_proj_prefill = AxModelInfer(
+            f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.onnx"
         )
         self.thinker_to_talker_proj = AxModelInfer(
-            f"thinker_to_talker_proj.onnx"
+            f"{model_dir}/thinker_to_talker_proj_decode.onnx"
         )
-        self.model = AxLMInfer(
-            cfg, model_dir, "qwen2_5_omni_talker", 352, 1023, run_dynamic
+        self.model = Qwen2_5OmniTalkerModel_AXInfer(
+            cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, run_dynamic, lazy_load
         )
+        self.prefill_len = prefill_len
         self.text_eos_token = 151861
         self.text_pad_token = 151859
         self.codec_mask_token = 8296
@@ -671,32 +424,26 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
             audio_feature_lengths,
             second_per_grids,
         )
-        print("position_ids", position_ids, position_ids.shape)
-        # with open("position_ids_talker_335","rb") as f:
-        #     position_ids = dill.load(f)
-        # print("position_ids", position_ids, position_ids.shape)
+        
         inputs_embeds[:, -1, :] += torch.from_numpy(
             self.model.embeds[self.codec_bos_token]
         )
         inputs_embeds[:, -2, :] += torch.from_numpy(
             self.model.embeds[self.codec_pad_token]
         )
-        print(f"model.embeds[{self.codec_bos_token}]", torch.from_numpy(
-            self.model.embeds[self.codec_bos_token]
-        ))
-        print(f"model.embeds[{self.codec_pad_token}]", torch.from_numpy(
-            self.model.embeds[self.codec_pad_token]
-        ))
-
-        print("inputs_embeds", inputs_embeds)
         
-        if inputs_embeds.shape[1] == 336:
-            talker_lm_input = self.thinker_to_talker_proj_336(
-                {"input": inputs_embeds.numpy()}
-            )[0]
-        elif inputs_embeds.shape[1] == 1:
+        inputs_embeds = inputs_embeds.numpy()
+        size = inputs_embeds.shape[1]
+        if size > 1:
+            assert size <= self.prefill_len
+            x = np.zeros([inputs_embeds.shape[0], self.prefill_len, inputs_embeds.shape[2] ], dtype=inputs_embeds.dtype)
+            x[:,0:size] = inputs_embeds
+            talker_lm_input = self.thinker_to_talker_proj_prefill(
+                {"input": x}
+            )[0][:,0:size]
+        elif size == 1:
             talker_lm_input = self.thinker_to_talker_proj(
-                {"input": inputs_embeds.numpy()}
+                {"input": inputs_embeds}
             )[0]
         else:
             assert False
@@ -782,13 +529,8 @@ class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
         self.model = AxModelInfer("token2wav_bigvgan.onnx", run_dynamic)
 
     def __call__(self, apm_mel):
-        import time
-
-        t1 = time.time()
         inputs = {"apm_mel": apm_mel.cpu().numpy()}
         out = self.model(inputs)[0]
-        t2 = time.time()
-        print("Qwen2_5OmniToken2WavBigVGANModel Onnx infer time", t2 - t1)
         out = torch.from_numpy(out).to(apm_mel.device)
         return out
 
@@ -799,7 +541,7 @@ class Qwen2_5OmniToken2WavModel_AxInfer:
             config.dit_config, run_dynamic
         )
         self.code2wav_bigvgan_model = Qwen2_5OmniToken2WavBigVGANModel_AxInfer(
-            config.bigvgan_config, run_dynamic
+            config.bigvgan_config, run_dynamic=True
         )
 
     def __call__(
@@ -830,29 +572,36 @@ class Qwen2_5OmniModel_AXInfer:
     def __init__(
         self,
         config,
+        thinker_dir, 
+        talker_dir,
+        prefill_len,
+        lastN=1023,
         max_len_talker_generate_codes=600,
         run_dynamic=False,
+        lazy_load=False,
         enable_audio_output=True,
     ):
         self.config = config
+        self.prefill_len = prefill_len
+        self.lastN = lastN
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AXInfer(
-            config.thinker_config, run_dynamic=False
+            config.thinker_config, thinker_dir, prefill_len, lastN, run_dynamic, lazy_load
         )
 
         self.has_talker = enable_audio_output
         self.speaker_map = {}
         if enable_audio_output:
-            self.enable_talker(run_dynamic)
+            self.enable_talker(talker_dir, run_dynamic, lazy_load)
             self.load_speakers("../../Qwen2.5-Omni-3B/spk_dict.pt")
 
         self.max_len_talker_generate_codes = max_len_talker_generate_codes
 
-    def enable_talker(self, run_dynamic):
+    def enable_talker(self, talker_dir, run_dynamic, lazy_load):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(
-            self.config.talker_config, False
+            self.config.talker_config, talker_dir, self.prefill_len, self.lastN, run_dynamic, lazy_load
         )
         self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(
-            self.config.token2wav_config, run_dynamic
+            self.config.token2wav_config, run_dynamic=run_dynamic
         )
         self.has_talker = True
 
@@ -877,19 +626,7 @@ class Qwen2_5OmniModel_AXInfer:
         ) = self.thinker(messages)
 
         speaker_params = self.speaker_map[speaker]
-        print(thinker_result)
-        print("len thinker_token_embeds", len(thinker_token_embeds))
-        print("len thinker_token_embeds[0]", len(thinker_token_embeds[0]))
-        print("thinker_token_embeds[0][0].shape", thinker_token_embeds[0].shape)
-        print("thinker_token_embeds[1][0].shape", thinker_token_embeds[1].shape)
-
-        print("len thinker_hidden_states", len(thinker_hidden_states))
-        print("len thinker_hidden_states[0]", len(thinker_hidden_states[0]))
-        print("thinker_hidden_states[0][0].shape", thinker_hidden_states[0].shape)
-        print("thinker_hidden_states[1][0].shape", thinker_hidden_states[1].shape)
-
-        # thinker_token_embeds = torch.from_numpy(thinker_token_embeds)
-        # thinker_hidden_states = torch.from_numpy(thinker_hidden_states)
+        
         thinker_hidden_states = [
             torch.from_numpy(ht.astype(np.float32)) for ht in thinker_hidden_states
         ]
@@ -897,13 +634,11 @@ class Qwen2_5OmniModel_AXInfer:
             torch.from_numpy(ht.astype(np.float32)) for ht in thinker_token_embeds
         ]
 
-        print("thinker_token_embeds[0]  embeds_to_talker ",thinker_token_embeds[0])
-        print("thinker_hidden_states[0]",thinker_hidden_states[0])
         
         thinker_reply_part = torch.cat(thinker_hidden_states[1:], dim=1) + torch.cat(
             thinker_token_embeds[1:], dim=1
         )
-        print("thinker_reply_part",thinker_reply_part.shape)
+
         talker_inputs_embeds = thinker_hidden_states[0] + thinker_token_embeds[0]
         talker_text_bos_token = speaker_params["bos_token"]
         talker_text_bos_embed = self.thinker.text_model.embeds[talker_text_bos_token]
@@ -911,9 +646,6 @@ class Qwen2_5OmniModel_AXInfer:
             1, 1, -1
         )
 
-        print("talker_inputs_embeds", talker_inputs_embeds.shape)
-        print("talker_text_bos_embed", talker_text_bos_embed.shape)
-        print("thinker_reply_part[:, :1, :]", thinker_reply_part[:, :1, :].shape)
         talker_inputs_embeds = torch.cat(
             [
                 talker_inputs_embeds,
@@ -937,13 +669,9 @@ class Qwen2_5OmniModel_AXInfer:
             ],
             dim=1,
         )
-        print("thinker_reply_part",thinker_reply_part.shape)
-        # input_ids = torch.from_numpy(input_ids)
-        print("input_ids", input_ids.shape)
 
         thinker_generate_ids = torch.tensor(output_token_ids).reshape(1, -1)
-        print("thinker_generate_ids",thinker_generate_ids)
-        print("thinker_generate_ids.shape", thinker_generate_ids.shape)
+        
         talker_input_text_ids = torch.cat(
             [
                 input_ids,
@@ -978,50 +706,6 @@ class Qwen2_5OmniModel_AXInfer:
             [torch.ones(1, 334), torch.ones(1, 334).new_ones((1, 2))], dim=1
         )
 
-        with open("talker_input_ids", "rb") as f:
-                talker_input_ids_gt = dill.load(f).float()
-
-        with open("talker_input_text_ids", "rb") as f:
-                talker_input_text_ids_gt = dill.load(f).float()
-
-        with open("thinker_reply_part", "rb") as f:
-                thinker_reply_part_gt =dill.load(f).float()
-
-        with open("talker_inputs_embeds", "rb") as f:
-                talker_inputs_embeds_gt = dill.load(f).float()
-
-        with open("talker_attention_mask", "rb") as f:
-                talker_attention_mask_gt = dill.load(f).float()
-                talker_attention_mask_gt = talker_attention_mask_gt.to(torch.long)
-
-
-        if not torch.equal(talker_input_ids,talker_input_ids_gt.long()):
-            print("talker_input_ids",talker_input_ids)
-            print("talker_input_ids_gt",talker_input_ids_gt)
-
-        if not torch.equal(talker_input_text_ids,talker_input_text_ids_gt.long()):
-            print("talker_input_text_ids",talker_input_text_ids)
-            print("talker_input_text_ids_gt",talker_input_text_ids_gt)
-
-        if not torch.equal(thinker_reply_part,thinker_reply_part_gt):
-            print("thinker_reply_part",thinker_reply_part)
-            print("thinker_reply_part_gt",thinker_reply_part_gt)
-
-            # thinker_reply_part = thinker_reply_part_gt
-
-        if not torch.equal(talker_inputs_embeds,talker_inputs_embeds_gt):
-            print("talker_inputs_embeds",talker_inputs_embeds)
-            print("talker_inputs_embeds_gt",talker_inputs_embeds_gt)
-
-        if not torch.equal(talker_attention_mask,talker_attention_mask_gt):
-            print("talker_attention_mask",talker_attention_mask.shape)
-            print("talker_attention_mask_gt", talker_attention_mask_gt.shape)
-
-        # if os.path.exists("talker_generate_codes"):
-        #     with open("talker_generate_codes", "rb") as f:
-        #         talker_generate_codes = dill.load(f)
-        # else:
-
         talker_result = self.talker(
             talker_input_ids.long(),
             talker_input_text_ids,
@@ -1030,17 +714,12 @@ class Qwen2_5OmniModel_AXInfer:
             talker_attention_mask,
             suppress_tokens=[self.talker.codec_bos_token],
         )
-        print("talker_result",talker_result)
         talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
-        print("talker_generate_codes",talker_generate_codes)
         talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
-            # with open("talker_generate_codes", "wb") as f:
-            #     dill.dump(talker_generate_codes, f)
         
-        del self.thinker 
-        del self.talker
-        gc.collect()
-
+        # del self.thinker 
+        # del self.talker
+        # gc.collect()
 
         effictive_len = talker_generate_codes.shape[1]
         effictive_len = min(effictive_len, self.max_len_talker_generate_codes)
@@ -1057,6 +736,6 @@ class Qwen2_5OmniModel_AXInfer:
             reference_mel=speaker_params["ref_mel"].float(),
         )
         wav = wav[0 : effictive_len * 480]
-        print("wav", wav.shape)
-        # return thinker_result, wav.float()
-        return "", wav.float()
+        
+        return thinker_result, wav.float()
+        

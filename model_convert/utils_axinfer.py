@@ -1,5 +1,4 @@
 import os
-
 import numpy as np
 import onnxruntime as ort
 from axengine import InferenceSession
@@ -10,6 +9,7 @@ import gc
 import dill 
 import torch
 from torch import nn
+from functools import wraps
 
 
 def isin_mps_friendly(elements: torch.Tensor, test_elements: torch.Tensor | int) -> torch.Tensor:
@@ -161,6 +161,11 @@ class InferEngine:
             outputs = self.session.run(outputnames, inputs, shape_group=shape_group)
         return outputs
 
+    def _unload(self):
+        if isinstance(self.session, InferenceSession):
+            self.session._sess._unload()
+        else:
+            del self.session
 
 class AxModelInferStatic:
     def __init__(self, axmodel_path):
@@ -174,6 +179,8 @@ class AxModelInferStatic:
             outputs = self.session.run(None, inputs, shape_group=shape_group)
         return outputs
 
+    def _unload(self):
+        self.session._unload()
 
 class AxModelInferDynamic:
     def __init__(self, axmodel_path):
@@ -208,182 +215,70 @@ class AxModelInfer:
 
         return outputs
 
+    def _unload(self):
+        self.model._unload()
+
+def lazyforward(func):
+    @wraps(func)  
+    def wrapper(self, *args, **kwargs):
+        if self.lazy_load:
+            self._load()
+
+        result = func(self, *args, **kwargs)  
+        
+        if self.lazy_load:
+            self._unload()
+
+        return result
+    return wrapper
 
 class AxLMInfer:
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False
+        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=True
     ):
 
-        # model_name="qwen2_5_omni_text"
         self.cfg = cfg
+        self.model_dir = model_dir
+        self.model_name = model_name
         self.prefill_len = prefill_len
+        self.lastN = lastN
+        self.run_dynamic = run_dynamic
+        self.lazy_load = lazy_load and (not run_dynamic)
 
         self.num_hidden_layers = self.cfg.num_hidden_layers
         self.hidden_size = self.cfg.hidden_size
 
+        if not self.lazy_load:
+            self._load()
+        
+    def _load(self):
         self.prefill_decoder_sessins = []
         for i in range(self.num_hidden_layers):
-            # session = InferenceSession(
-            #     f"{model_dir}/{model_name}_p{prefill_len}_l{i}_together.AxModel"
-            # )
+            
             session = AxModelInfer(
-                f"{model_dir}/{model_name}_p{prefill_len}_l{i}_together.axmodel",
-                run_dynamic,
+                f"{self.model_dir}/{self.model_name}_p{self.prefill_len}_l{i}_together.axmodel",
+                self.run_dynamic,
             )
             self.prefill_decoder_sessins.append(session)
-        # self.post_process_session = InferenceSession(
-        #     f"{model_dir}/{model_name}_post.axmodel"
-        # )
-        self.post_process_session = AxModelInfer(
-            f"{model_dir}/{model_name}_post.axmodel", run_dynamic
-        )
-        self.embeds = np.load(f"{model_dir}/model.embed_tokens.weight.npy")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-        self.lastN = lastN
-
-        self.thinker_to_talker_proj = AxModelInfer(
-            f"thinker_to_talker_proj.onnx", 
-            run_dynamic
-        )
-
-    def embed_tokens(self, input_ids):
-        return np.take(self.embeds, input_ids, axis=0)
-        # output = np.take(self.embeds, input_ids, axis=0)
-        # output = self.thinker_to_talker_proj({"input": output})[0]
-        # return output
-
-    def __call__(
-        self,
-        input_ids=None,
-        input_embeds=None,
-        position_ids=None,
-        thinker_reply_part=None
-    ):
-
-        if (input_ids is None) ^ (input_embeds is not None):
-            raise ValueError(
-                "You must specify exactly one of input_ids or input_embeds"
-            )
-
-        if input_ids is None:
-            print("input_embeds",input_embeds.shape)
-            input_ids = [0]*input_embeds.shape[1]       # 添加占位符
-            # with open("talker_input_ids", "rb") as f:
-            #     talker_input_ids = dill.load(f)
-            # input_ids = talker_input_ids.int().reshape(-1).tolist()
-        # if input_embeds is None:
-            # input_embeds = self.embed_tokens(input_ids)
-        assert input_embeds is not None
-
-        hidden_states = input_embeds
-
-        kv_dim = (
-            self.cfg.hidden_size
-            // self.cfg.num_attention_heads
-            * self.cfg.num_key_value_heads
-        )
-        k_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=np.float32)
-            for _ in range(self.cfg.num_hidden_layers)
-        ]
-        v_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=np.float32)
-            for _ in range(self.cfg.num_hidden_layers)
-        ]
-
-        # print("hidden_states.shape", hidden_states.shape)
-        token_len = hidden_states.shape[1]
-        prompt_ignore_length = token_len
-        indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
-        # print("token_len", token_len)
-        # print("position_ids.shape", position_ids.shape)
-        indices[:, 0:token_len] = position_ids.squeeze(1).numpy().astype(np.uint32)
-        # print("indices", indices.shape)
-        mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
-        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(np.float32)
-        # thinker_token_embeds = []
-        # thinker_hidden_states = []
-        # print("data", data.shape)
-        data[:, 0:token_len] = hidden_states
-        # thinker_token_embeds.append(data[:, 0:token_len])
-        for i in range(token_len):
-            mask[:, i, : i + 1] = 0
-
-        mask = mask.astype(bfloat16)
-        for i in range(self.num_hidden_layers):
-            input_feed = {
-                "K_cache": np.zeros((1, 1, self.hidden_size), dtype=np.float32),
-                "V_cache": np.zeros((1, 1, self.hidden_size), dtype=np.float32),
-                "indices": indices,
-                "input": data,
-                "mask": mask,
-            }
-            outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
-
-            k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
-            v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
-            data[:, 0:token_len] = outputs[2][:, :token_len, :]
-
-        post_out = self.post_process_session(
-            {"input": data[:, token_len - 1 : token_len, :]}
-        )[0]
-
-        next_token, posssible_tokens, possible_soft = post_process(input_ids[prompt_ignore_length:], post_out, topk=40, topp=0.8, temperature=0.9, repetition_penalty=1.1, suppress_tokens=[8293])
-        input_ids.append(next_token)
-        print("prefill done!")
-        # set to decoder
-
-        start_ids = np.max(indices) + 1
-        print("start ids",start_ids)
         
-        mask = np.zeros((1, 1, self.lastN + 1), dtype=np.float32).astype(bfloat16)
-        mask[:, :, : self.lastN] -= 65536
-        mask[:, :, :token_len] = 0
-        for start_indice in range(np.max(indices) + 1, self.lastN + 1):
+        self.post_process_session = AxModelInfer(
+            f"{self.model_dir}/{self.model_name}_post.axmodel", self.run_dynamic
+        )
 
-            if self.prefill_len > 0 and start_indice < token_len:
-                continue
-            next_token = input_ids[start_indice]
-            indices = np.array([start_ids], np.uint32).reshape((1, 1))
-            start_ids += 1
+    def _unload(self):
+        for session in self.prefill_decoder_sessins:
+            session._unload()
+        self.post_process_session._unload()
 
-            codec_embeds = self.embed_tokens( np.array([next_token])).reshape(1,1,-1)
-            inputs_embeds = codec_embeds + thinker_reply_part[:, :1, :].numpy()
-            if thinker_reply_part.shape[1] > 1:
-                thinker_reply_part = thinker_reply_part[:, 1:, :]
-            inputs_embeds = self.thinker_to_talker_proj({"input": inputs_embeds})[0]
+        self.prefill_decoder_sessins = None
+        self.post_process_session = None
+    
+    def forward(self,*args, **kwargs):
+        raise NotImplementedError("forward funciton was not implemented")
 
-            data = inputs_embeds
-            
-            # print("--------------------------------------indices", indices, "next_token", next_token)
-            for i in range(self.cfg.num_hidden_layers):
-                # print("decode layer:",i)
-                input_feed = {
-                    "K_cache": k_caches[i],
-                    "V_cache": v_caches[i],
-                    "indices": indices,
-                    "input": data,
-                    "mask": mask,
-                }
+    @lazyforward
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
 
-                outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=0)
+        
 
-                k_caches[i][:, start_indice, :] = outputs[0][:, :, :]
-                v_caches[i][:, start_indice, :] = outputs[1][:, :, :]
-                data = outputs[2]
-            mask[..., start_indice] = 0
-            if start_indice < token_len - 1:
-                pass
-            else:
-
-                post_out = self.post_process_session({"input": data})[0]
-                
-                next_token, posssible_tokens, possible_soft = post_process(input_ids[prompt_ignore_length:], post_out, topk=40, topp=0.8, temperature=0.9, repetition_penalty=1.1, suppress_tokens=[8293])
-                input_ids.append(next_token)
-                # print("---------------------------------next_token ", next_token)
-                
-            if next_token in [8292, 8294]:
-                print("hit eos!")
-                break
-
-        return input_ids

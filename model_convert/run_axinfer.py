@@ -4,10 +4,14 @@ from transformers  import Qwen2_5OmniConfig
 from modeling_axinfer import Qwen2_5OmniModel_AXInfer
 
 model_path = "../../Qwen2.5-Omni-3B/"
-print("start load config")
 config = Qwen2_5OmniConfig.from_pretrained(model_path)
-print("load config done")
-model = Qwen2_5OmniModel_AXInfer(config, run_dynamic=True)
+
+thinker_dir="../../Qwen2.5-Omni-3B-AX650N-prefill352-0620-s8/"
+talker_dir="../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/"
+prefill_len=352
+lastN=1023
+
+model = Qwen2_5OmniModel_AXInfer(config, thinker_dir, talker_dir, prefill_len, lastN,  run_dynamic=False, lazy_load=True)
 
 video_path = "2.mp4"
 messages = [
