@@ -10,9 +10,7 @@ pulsar2 llm_build \
                 --input_path $INPUT \
                 --output_path $OUTPUT \
                 --kv_cache_len 1023 \
-                --hidden_state_type fp32 \
-                --post_weight_type bf16 \
-                --weight_type fp32 \
+                --hidden_state_type bf16 \
                 --prefill_len 352 \
                 --chip AX650 \
                 --parallel 16 \
@@ -26,4 +24,4 @@ python tools/embed-process.py --input $OUTPUT/model.embed_tokens.weight.npy --ou
 
 cp $INPUT/*.json $OUTPUT
 cp $INPUT/merges.txt $OUTPUT
-
+cp $INPUT/spk_dict.pt $OUTPUT

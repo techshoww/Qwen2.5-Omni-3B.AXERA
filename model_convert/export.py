@@ -45,8 +45,7 @@ def generate_attnmask(seq_length, cu_seqlens, device):
 
     return attention_mask
 
-# checkpoint_dir = sys.argv[1] if len(sys.argv)>=2 else "../../Qwen/Qwen2.5-VL-3B-Instruct/"
-checkpoint_dir="/data/lihongjie/Qwen2.5-Omni-3B"
+checkpoint_dir = sys.argv[1] if len(sys.argv)>=2 else "../../Qwen/Qwen2.5-Omni-3B-Instruct/"
 # which = sys.argv[2] if len(sys.argv)>=3 else "image"
 which = "video"
 

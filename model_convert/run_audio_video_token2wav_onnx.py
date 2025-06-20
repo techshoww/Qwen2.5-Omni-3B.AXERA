@@ -74,7 +74,7 @@ def inference(video_path):
 
 
 device = torch.device("cpu")
-model_path = "../../Qwen2.5-Omni-3B/"
+model_path = sys.argv[1]
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,

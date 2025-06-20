@@ -8,6 +8,7 @@ import soundfile as sf
 from preprocess import Qwen2VLImageProcessorExport
 from transformers.image_utils import PILImageResampling
 import numpy as np
+import sys
 # @title inference function
 def inference(video_path):
     messages = [
@@ -75,7 +76,7 @@ def inference(video_path):
 
 
 device = torch.device("cuda")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = sys.argv[1]
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,

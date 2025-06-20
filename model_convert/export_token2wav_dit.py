@@ -44,7 +44,7 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
     # [libprotobuf ERROR /tmp/pip-install-g8oov4oc/onnxsim_7f61fd2e2c6d42a2abf5f2968fd227a6/third_party/onnx-optimizer/third_party/protobuf/src/google/protobuf/message_lite.cc:449] onnx.ModelProto exceeded maximum protobuf size of 2GB: 2878887489
 
 device = torch.device("cuda")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = sys.argv[1]
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.float32,

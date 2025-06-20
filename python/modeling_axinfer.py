@@ -453,8 +453,8 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
 
 
 class Qwen2_5OmniToken2WavDiTModel_AxInfer:
-    def __init__(self, config, run_dynamic=False):
-        self.model = AxModelInfer("token2wav_dit.onnx", run_dynamic)
+    def __init__(self, config, model_path, run_dynamic=False):
+        self.model = AxModelInfer(model_path, run_dynamic)
         self.mel_dim = config.mel_dim
         self.repeats = config.repeats
 
@@ -525,8 +525,8 @@ class Qwen2_5OmniToken2WavDiTModel_AxInfer:
 
 
 class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
-    def __init__(self, config, run_dynamic=False):
-        self.model = AxModelInfer("token2wav_bigvgan.onnx", run_dynamic)
+    def __init__(self, config, model_path, run_dynamic=False):
+        self.model = AxModelInfer(model_path, run_dynamic)
 
     def __call__(self, apm_mel):
         inputs = {"apm_mel": apm_mel.cpu().numpy()}
@@ -536,12 +536,12 @@ class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
 
 
 class Qwen2_5OmniToken2WavModel_AxInfer:
-    def __init__(self, config, run_dynamic=False):
+    def __init__(self, config, model_dir, run_dynamic=False):
         self.code2wav_dit_model = Qwen2_5OmniToken2WavDiTModel_AxInfer(
-            config.dit_config, run_dynamic
+            config.dit_config, f"{model_dir}/token2wav_dit.onnx", run_dynamic
         )
         self.code2wav_bigvgan_model = Qwen2_5OmniToken2WavBigVGANModel_AxInfer(
-            config.bigvgan_config, run_dynamic=True
+            config.bigvgan_config, f"{model_dir}/token2wav_bigvgan.onnx", run_dynamic=True
         )
 
     def __call__(
@@ -592,7 +592,7 @@ class Qwen2_5OmniModel_AXInfer:
         self.speaker_map = {}
         if enable_audio_output:
             self.enable_talker(talker_dir, run_dynamic, lazy_load)
-            self.load_speakers("../../Qwen2.5-Omni-3B/spk_dict.pt")
+            self.load_speakers(f"{talker_dir}/spk_dict.pt")
 
         self.max_len_talker_generate_codes = max_len_talker_generate_codes
 
@@ -601,7 +601,7 @@ class Qwen2_5OmniModel_AXInfer:
             self.config.talker_config, talker_dir, self.prefill_len, self.lastN, run_dynamic, lazy_load
         )
         self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(
-            self.config.token2wav_config, run_dynamic=run_dynamic
+            self.config.token2wav_config, talker_dir, run_dynamic=run_dynamic
         )
         self.has_talker = True
 

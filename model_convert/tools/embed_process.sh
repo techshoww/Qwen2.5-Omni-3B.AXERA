@@ -8,6 +8,6 @@ python tools/embed-process.py --input $output/model.embed_tokens.weight.npy --ou
 ./tools/fp32_to_bf16 $output/model.embed_tokens.weight.float32.bin $output/model.embed_tokens.weight.bfloat16.bin
 
 
-# output=/data/tmp/yongqiang/nfs/lhj/Qwen2.5-VL-3B-Instruct-AX650-video-prefill_512/
+# output=/data/tmp/yongqiang/nfs/lhj/Qwen2.5-Omni-3B-Instruct-AX650-video-prefill_512/
 # python tools/embed-process.py --input $output/model.embed_tokens.weight.npy --output $output/model.embed_tokens.weight.float32.bin
 # ./tools/fp32_to_bf16 $output/model.embed_tokens.weight.float32.bin $output/model.embed_tokens.weight.bfloat16.bin

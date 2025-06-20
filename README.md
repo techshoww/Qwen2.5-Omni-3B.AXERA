@@ -1,46 +1,58 @@
-# Qwen2.5-Omni-7B.AXERA
+# Qwen2.5-VL-3B-Instruct DEMO on Axera
+- 视频理解模型转换参考 [模型转换](/model_convert/README.md)
+- cpp demo 开发中
 
-## 一、转换 audio encoder（torch -> onnx -> axmodel）  
-### 1. 导出 audio encoder  
-```
-python run_audio_infer.py  "your path to Qwen2.5-VL-3B-Instruct"
-python export_audio.py "your path to Qwen2.5-VL-3B-Instruct"
-```
-### 2. 转换 onnx 模型（torch -> onnx -> axmodel）    
-在工具链环境中执行  
-```
-bash build_AE.sh
-```
-编译完成后的模型在 build-output-audio/audio_tower.axmodel
+## 支持平台
+
+- [x] AX650N
 
 
-## 二、转换 vision encoder (torch -> onnx -> axmodel)  
-### 1. 导出 vision encoder  
-```
-CKPT="your path to Qwen2.5-VL-3B-Instruct"
-#（1）执行推理保存所需输出
-python run_nchw.py $CKPT
-#（2）导出onnx
-python export.py $CKPT
-#（3）测试导出是否正确
-python test_onnx.py $CKPT
-```
-### 2. 转换 onnx 模型（onnx -> axmodel）    
-```
-bash build_VE.sh
-```
-编译完成后的模型在 build-output-nchw308/Qwen2.5-Omni-3B_vision.axmodel
+### Python API 运行
 
-## 三、转换 Qwen2_5OmniThinkerTextModel (torch -> axmodel)  
-在工具链环境中执行  
+#### Requirements
+
 ```
-build_LM.sh  "your path to Qwen2.5-VL-3B-Instruct"  "your output dir"
+pip uninstall transformers
+pip install git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview
+pip install accelerate
+pip install qwen-omni-utils[decord]
+pip install soundfile
+pip install https://github.com/AXERA-TECH/pyaxengine/releases/download/0.1.3.rc1/axengine-0.1.3-py3-none-any.whl
+```
+
+
+**视频理解示例**
+
+在开发板上运行命令
+
+```
+cd python
+python3 run_axinfer.py
 ```  
-## 四、转换 Qwen2_5OmniTalkerModel (torch -> axmodel)  
-在工具链环境中执行  
+**输入**
 ```
-build_Talker.sh  "your path to Qwen2.5-VL-3B-Instruct"  "your output dir"
+video_path = "2.mp4"
+messages = [
+            {
+                "role": "system",
+                "content": [
+                    {"type":"text", "text":"You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": video_path, "max_pixels": 308 * 308, "min_pixels": 308 * 308, "fps": 1.0,} ,
+                ],
+            },
+        ]
 ```
 
-## 五、转换 Qwen2_5OmniToken2WavDiTModel (torch -> onnx -> axmodel)  
-### 1. 
+[视频片段](python/2.mp4)
+
+**文字输出**  
+```
+It's a Nord Electro 6 keyboard. It's a really popular one. It has a lot of features like different sounds and effects. Have you played with it much?<|im_end|>
+```
+**语音输出**
+[语音](python/output.wav)
