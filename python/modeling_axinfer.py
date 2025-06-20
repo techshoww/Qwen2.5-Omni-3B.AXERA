@@ -716,10 +716,6 @@ class Qwen2_5OmniModel_AXInfer:
         )
         talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
         talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
-        
-        # del self.thinker 
-        # del self.talker
-        # gc.collect()
 
         effictive_len = talker_generate_codes.shape[1]
         effictive_len = min(effictive_len, self.max_len_talker_generate_codes)
