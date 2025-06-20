@@ -1,7 +1,9 @@
 set -e 
 
-INPUT=../../Qwen2.5-Omni-3B/
-OUTPUT=../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/
+INPUT=$1
+INPUT=$2
+# INPUT=../../Qwen2.5-Omni-3B/
+# OUTPUT=../../Qwen2.5-Omni-3B-AX650N-talker-prefill352/
 
 pulsar2 llm_build \
                 --model_type qwen2_5_omni_talker \

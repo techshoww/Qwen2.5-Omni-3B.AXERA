@@ -17,21 +17,6 @@ def inference(audio_path, prompt, sys_prompt):
             ]
         },
     ]
-#     messages = [
-#     {
-#         "role": "system",
-#         "content": [
-#             {"type": "text", "text": sys_prompt}
-#         ],
-#     },
-#     {
-#         "role": "user",
-#         "content": [
-#                 {"type": "text", "text": prompt},
-#                 {"type": "audio", "audio": audio_path},
-#             ]
-#     },
-# ]
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     print("text:", text)
@@ -50,7 +35,7 @@ def inference(audio_path, prompt, sys_prompt):
 
 
 device = torch.device("cuda:0")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = sys.argv[1]
 model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
     model_path,
     torch_dtype=torch.bfloat16,

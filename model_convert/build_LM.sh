@@ -1,15 +1,20 @@
 set -e
 
+INPUT=$1
+OUTPUT=$2
+
 pulsar2 llm_build \
                 --model_type qwen2_5_omni_text \
-                --input_path ../../Qwen2.5-Omni-3B/ \
-                --output_path ../../Qwen2.5-Omni-3B-AX650N-prefill352/ \
-                --kv_cache_len 1023 --hidden_state_type bf16 --prefill_len 352 \
-                --chip AX650 \
-                --parallel 16
+                --input_path ${INPUT} \
+                --output_path ${OUTPUT} \
+                --hidden_state_type bf16 \
+                --kv_cache_len 1023 --prefill_len 352 \
+                --chip AX650 
 
 
-bash tools/embed_process.sh  ../../Qwen2.5-Omni-3B/   ../../Qwen2.5-Omni-3B-AX650N-prefill352/
+bash tools/embed_process.sh  ${INPUT}   ${OUTPUT}
 
-cp ../../Qwen2.5-Omni-3B/*.json ../../Qwen2.5-Omni-3B-AX650N-prefill352/
-cp ../../Qwen2.5-Omni-3B/merges.txt ../../Qwen2.5-Omni-3B-AX650N-prefill352/
+cp ${INPUT}*.json ${OUTPUT}
+cp ${INPUT}merges.txt ${OUTPUT}
+
+chmod 777 ${OUTPUT} -R

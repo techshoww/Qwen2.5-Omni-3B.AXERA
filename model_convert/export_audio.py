@@ -44,7 +44,7 @@ def export_onnx(model, input, input_names, output_names, onnx_output):
 
 
 device = torch.device("cpu")
-model_path = "/data/lihongjie/Qwen2.5-Omni-3B"
+model_path = sys.argv[1]
 model = Qwen2_5OmniModel_Export.from_pretrained(
     model_path,
     torch_dtype=torch.float32,
