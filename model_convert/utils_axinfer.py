@@ -291,19 +291,19 @@ class AxLMInfer:
             for _ in range(self.cfg.num_hidden_layers)
         ]
 
-        print("hidden_states.shape", hidden_states.shape)
+        # print("hidden_states.shape", hidden_states.shape)
         token_len = hidden_states.shape[1]
         prompt_ignore_length = token_len
         indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
-        print("token_len", token_len)
-        print("position_ids.shape", position_ids.shape)
+        # print("token_len", token_len)
+        # print("position_ids.shape", position_ids.shape)
         indices[:, 0:token_len] = position_ids.squeeze(1).numpy().astype(np.uint32)
-        print("indices", indices.shape)
+        # print("indices", indices.shape)
         mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
         data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(np.float32)
         # thinker_token_embeds = []
         # thinker_hidden_states = []
-        print("data", data.shape)
+        # print("data", data.shape)
         data[:, 0:token_len] = hidden_states
         # thinker_token_embeds.append(data[:, 0:token_len])
         for i in range(token_len):
@@ -355,7 +355,7 @@ class AxLMInfer:
 
             data = inputs_embeds
             
-            print("--------------------------------------indices", indices, "next_token", next_token)
+            # print("--------------------------------------indices", indices, "next_token", next_token)
             for i in range(self.cfg.num_hidden_layers):
                 # print("decode layer:",i)
                 input_feed = {
@@ -380,7 +380,7 @@ class AxLMInfer:
                 
                 next_token, posssible_tokens, possible_soft = post_process(input_ids[prompt_ignore_length:], post_out, topk=40, topp=0.8, temperature=0.9, repetition_penalty=1.1, suppress_tokens=[8293])
                 input_ids.append(next_token)
-                print("---------------------------------next_token ", next_token)
+                # print("---------------------------------next_token ", next_token)
                 
             if next_token in [8292, 8294]:
                 print("hit eos!")

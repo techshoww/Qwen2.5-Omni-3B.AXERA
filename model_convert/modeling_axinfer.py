@@ -25,7 +25,9 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
     Qwen2_5OmniVisionEncoder, Qwen2_5OmniVisionSdpaAttention,
     RungeKutta4ODESolver, apply_rotary_pos_emb_vision, kaiser_sinc_filter1d)
 from utils import get_chunked_index, get_llm_pos_ids_for_vision, get_rope_index
-from utils_axinfer import AxLMInfer, AxModelInfer, post_process
+from utils_axinfer import AxLMInfer, AxModelInfer
+
+
 
 
 class AxLanguageModelInfer:
@@ -60,6 +62,39 @@ class AxLanguageModelInfer:
         self.tokenizer = AutoTokenizer.from_pretrained(mode_dir, trust_remote_code=True)
         self.lastN = lastN
 
+    def post_process(self, data, topk=1, topp=0.001, temperature=0.1):
+        def top_p(l: np.ndarray, p: float) -> np.ndarray:
+            index = np.argsort(l)
+            res = l.copy()
+            sum_p = 0
+            for i in index[::-1]:
+                if sum_p >= p:
+                    res[i] = 0
+                sum_p += res[i]
+            return res / sum_p
+
+        def softmax(l: np.ndarray) -> np.ndarray:
+            l_max = l - l.max()
+            l_exp = np.exp(l_max)
+            res = l_exp / np.sum(l_exp)
+            return res.astype(np.float64)
+
+        r = data.astype(np.float32)
+        r = r.flatten()
+        # topk
+        candidate_index = np.argpartition(r, -topk)[-topk:]
+        candidate_value = r[candidate_index]
+        # temperature
+        candidate_value /= temperature
+        # softmax
+        candidate_soft = softmax(candidate_value)
+        # topp
+        candidate_soft = top_p(candidate_soft, topp)
+        candidate_soft = candidate_soft.astype(np.float64) / candidate_soft.sum()
+        pos = np.random.multinomial(1, candidate_soft).argmax()
+        next_token = candidate_index[pos]
+        return next_token, candidate_index, candidate_soft
+
     def __call__(self, token_ids, prefill_data, position_ids):
 
         kv_dim = (
@@ -91,17 +126,16 @@ class AxLanguageModelInfer:
 
         indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
         prompt_ignore_length = token_len
-        print("token_len", token_len)
-        print("position_ids.shape", position_ids.shape)
+
         indices[:, 0:token_len] = position_ids.squeeze(1).astype(np.uint32)
-        print("indices", indices.shape)
         mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
         data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(bfloat16)
         thinker_token_embeds = []
         thinker_hidden_states = []
-        print("data", data.shape)
-        data[:, 0:token_len] = prefill_data
-        thinker_token_embeds.append(data[:, 0:token_len])
+        
+        print("prefill_data",prefill_data)
+        data[:, 0:token_len] = prefill_data.numpy().astype(bfloat16)
+        thinker_token_embeds.append(prefill_data.numpy())
         for i in range(token_len):
             mask[:, i, : i + 1] = 0
 
@@ -120,27 +154,33 @@ class AxLanguageModelInfer:
             v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
             data[:, 0:token_len] = outputs[2][:, :token_len, :]
 
-        _, post_out = self.post_process_session(
+        # _, post_out = self.post_process_session(
+        #     {"input": data[:, token_len - 1 : token_len, :]}
+        # )
+        print("prefill ht before norm",data[:, 0:token_len])
+        post_out = self.post_process_session(
             {"input": data[:, token_len - 1 : token_len, :]}
-        )
+        )[1]
 
         post_norm = []
         for ti in range(token_len):
 
-            pn, _ = self.post_process_session({"input": data[:, ti : ti + 1, :]})
+            # pn, _ = self.post_process_session({"input": data[:, ti : ti + 1, :]})
+            pn = self.post_process_session({"input": data[:, ti : ti + 1, :]})[0]
 
             post_norm.append(pn)
+           
         post_norm = np.concatenate(post_norm, axis=1)
-
+        print("prefill norm hidden_states",post_norm)
+    
         thinker_hidden_states.append(post_norm)
-        print("post_out", post_out, post_out.shape)
-        next_token, posssible_tokens, possible_soft = post_process(token_ids, post_out, topk=1)
-        posibles = [self.tokenizer.decode([t]) for t in posssible_tokens]
-        posible_soft = [str((t, s)) for t, s in zip(posibles, possible_soft)]
+        next_token, posssible_tokens, possible_soft = self.post_process( post_out, topk=1)
+        # posibles = [self.tokenizer.decode([t]) for t in posssible_tokens]
+        # posible_soft = [str((t, s)) for t, s in zip(posibles, possible_soft)]
         token_ids.append(next_token)
-        print("posibles", posibles)
-        print(self.tokenizer.decode(token_ids[-1:]))
-        print("prefill done!")
+        # print("posibles", posibles)
+        # print(self.tokenizer.decode(token_ids[-1:]))
+        # print("prefill done!")
 
         # set to decoder
 
@@ -161,7 +201,7 @@ class AxLanguageModelInfer:
                 .astype(bfloat16)
             )
             thinker_token_embeds.append(data)
-            print("indices", indices)
+            # print("indices", indices)
             for i in range(self.cfg.num_hidden_layers):
                 # print("decode layer:",i)
                 input_feed = {
@@ -184,14 +224,14 @@ class AxLanguageModelInfer:
 
                 post_norm, post_out = self.post_process_session({"input": data})
                 thinker_hidden_states.append(post_norm)
-                print("post_out", post_out.shape)
-                next_token, posssible_tokens, possible_soft = post_process(token_ids, post_out)
+                
+                next_token, posssible_tokens, possible_soft = self.post_process( post_out)
                 token_ids.append(next_token)
                 print(self.tokenizer.decode(token_ids[-1:]))
             if next_token == self.tokenizer.eos_token_id:
                 # print("hit eos!")
                 break
-
+        
         return (
             self.tokenizer.decode(token_ids[token_len:]),
             token_ids[token_len:],
@@ -558,7 +598,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
         use_audio_in_video = True
 
         second_per_grids = torch.ones(1)
-        print("config", self.config)
+        # print("config", self.config)
         position_ids, _ = get_rope_index(
             self.config,
             input_ids,
@@ -569,8 +609,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             audio_feature_lengths,
             second_per_grids,
         )
-        print("position_ids", position_ids)
-        print("input_ids", input_ids)
+        # print("position_ids", position_ids)
+        print("thinker text model input_ids", input_ids)
+        print("thinker text model inputs_embeds",inputs_embeds)
         output, output_token_ids, thinker_token_embeds, thinker_hidden_states = (
             self.text_model(
                 input_ids[0].tolist(), inputs_embeds, position_ids.cpu().numpy()
@@ -795,7 +836,7 @@ class Qwen2_5OmniModel_AXInfer:
     ):
         self.config = config
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AXInfer(
-            config.thinker_config, run_dynamic=run_dynamic
+            config.thinker_config, run_dynamic=False
         )
 
         self.has_talker = enable_audio_output
@@ -827,170 +868,174 @@ class Qwen2_5OmniModel_AXInfer:
     ):
 
         # if not os.path.exists("thinker_result"):
-        #     (
-        #         thinker_result,
-        #         thinker_token_embeds,
-        #         thinker_hidden_states,
-        #         input_ids,
-        #         output_token_ids,
-        #     ) = self.thinker(messages)
-
-        #     with open("thinker_result", "wb") as f:
-        #         dill.dump(thinker_result, f)
-
-        #     with open("thinker_token_embeds", "wb") as f:
-        #         dill.dump(thinker_token_embeds, f)
-
-        #     with open("thinker_hidden_states", "wb") as f:
-        #         dill.dump(thinker_hidden_states, f)
-
-        #     with open("input_ids", "wb") as f:
-        #         dill.dump(input_ids, f)
-
-        #     with open("output_token_ids", "wb") as f:
-        #         dill.dump(output_token_ids, f)
-        # else:
-        #     with open("thinker_result", "rb") as f:
-        #         thinker_result = dill.load(f)
-        #     with open("thinker_token_embeds", "rb") as f:
-        #         thinker_token_embeds = dill.load(f)
-        #     with open("thinker_hidden_states", "rb") as f:
-        #         thinker_hidden_states = dill.load(f)
-        #     with open("input_ids", "rb") as f:
-        #         input_ids = dill.load(f)
-        #     with open("output_token_ids", "rb") as f:
-        #         output_token_ids = dill.load(f)
+        (
+            thinker_result,
+            thinker_token_embeds,
+            thinker_hidden_states,
+            input_ids,
+            output_token_ids,
+        ) = self.thinker(messages)
 
         speaker_params = self.speaker_map[speaker]
-        # print(thinker_result)
-        # print("len thinker_token_embeds", len(thinker_token_embeds))
-        # print("len thinker_token_embeds[0]", len(thinker_token_embeds[0]))
-        # print("thinker_token_embeds[0][0].shape", thinker_token_embeds[0].shape)
-        # print("thinker_token_embeds[1][0].shape", thinker_token_embeds[1].shape)
+        print(thinker_result)
+        print("len thinker_token_embeds", len(thinker_token_embeds))
+        print("len thinker_token_embeds[0]", len(thinker_token_embeds[0]))
+        print("thinker_token_embeds[0][0].shape", thinker_token_embeds[0].shape)
+        print("thinker_token_embeds[1][0].shape", thinker_token_embeds[1].shape)
 
-        # print("len thinker_hidden_states", len(thinker_hidden_states))
-        # print("len thinker_hidden_states[0]", len(thinker_hidden_states[0]))
-        # print("thinker_hidden_states[0][0].shape", thinker_hidden_states[0].shape)
-        # print("thinker_hidden_states[1][0].shape", thinker_hidden_states[1].shape)
+        print("len thinker_hidden_states", len(thinker_hidden_states))
+        print("len thinker_hidden_states[0]", len(thinker_hidden_states[0]))
+        print("thinker_hidden_states[0][0].shape", thinker_hidden_states[0].shape)
+        print("thinker_hidden_states[1][0].shape", thinker_hidden_states[1].shape)
 
-        # # thinker_token_embeds = torch.from_numpy(thinker_token_embeds)
-        # # thinker_hidden_states = torch.from_numpy(thinker_hidden_states)
-        # thinker_hidden_states = [
-        #     torch.from_numpy(ht.astype(np.float32)) for ht in thinker_hidden_states
-        # ]
-        # thinker_token_embeds = [
-        #     torch.from_numpy(ht.astype(np.float32)) for ht in thinker_token_embeds
-        # ]
-        # thinker_reply_part = torch.cat(thinker_hidden_states[1:], dim=1) + torch.cat(
-        #     thinker_token_embeds[1:], dim=1
-        # )
-        # talker_inputs_embeds = thinker_hidden_states[0] + thinker_token_embeds[0]
-        # talker_text_bos_token = speaker_params["bos_token"]
-        # talker_text_bos_embed = self.thinker.text_model.embeds[talker_text_bos_token]
-        # talker_text_bos_embed = torch.from_numpy(talker_text_bos_embed).reshape(
-        #     1, 1, -1
-        # )
+        # thinker_token_embeds = torch.from_numpy(thinker_token_embeds)
+        # thinker_hidden_states = torch.from_numpy(thinker_hidden_states)
+        thinker_hidden_states = [
+            torch.from_numpy(ht.astype(np.float32)) for ht in thinker_hidden_states
+        ]
+        thinker_token_embeds = [
+            torch.from_numpy(ht.astype(np.float32)) for ht in thinker_token_embeds
+        ]
 
-        # print("talker_inputs_embeds", talker_inputs_embeds.shape)
-        # print("talker_text_bos_embed", talker_text_bos_embed.shape)
-        # print("thinker_reply_part[:, :1, :]", thinker_reply_part[:, :1, :].shape)
-        # talker_inputs_embeds = torch.cat(
-        #     [
-        #         talker_inputs_embeds,
-        #         talker_text_bos_embed,
-        #         thinker_reply_part[:, :1, :],
-        #     ],
-        #     dim=1,
-        # )
+        print("thinker_token_embeds[0]  embeds_to_talker ",thinker_token_embeds[0])
+        print("thinker_hidden_states[0]",thinker_hidden_states[0])
+        
+        thinker_reply_part = torch.cat(thinker_hidden_states[1:], dim=1) + torch.cat(
+            thinker_token_embeds[1:], dim=1
+        )
+        print("thinker_reply_part",thinker_reply_part.shape)
+        talker_inputs_embeds = thinker_hidden_states[0] + thinker_token_embeds[0]
+        talker_text_bos_token = speaker_params["bos_token"]
+        talker_text_bos_embed = self.thinker.text_model.embeds[talker_text_bos_token]
+        talker_text_bos_embed = torch.from_numpy(talker_text_bos_embed).reshape(
+            1, 1, -1
+        )
 
-        # eos_embedding = self.thinker.text_model.embeds[self.talker.text_eos_token]
-        # eos_embedding = torch.from_numpy(eos_embedding).reshape(1, 1, -1)
+        print("talker_inputs_embeds", talker_inputs_embeds.shape)
+        print("talker_text_bos_embed", talker_text_bos_embed.shape)
+        print("thinker_reply_part[:, :1, :]", thinker_reply_part[:, :1, :].shape)
+        talker_inputs_embeds = torch.cat(
+            [
+                talker_inputs_embeds,
+                talker_text_bos_embed,
+                thinker_reply_part[:, :1, :],
+            ],
+            dim=1,
+        )
 
-        # pad_embedding = self.thinker.text_model.embeds[self.talker.text_pad_token]
-        # pad_embedding = torch.from_numpy(pad_embedding).reshape(1, 1, -1)
+        eos_embedding = self.thinker.text_model.embeds[self.talker.text_eos_token]
+        eos_embedding = torch.from_numpy(eos_embedding).reshape(1, 1, -1)
 
-        # thinker_reply_part = torch.cat(
-        #     [
-        #         thinker_reply_part[:, 1:, :],
-        #         eos_embedding,
-        #         pad_embedding,
-        #     ],
-        #     dim=1,
-        # )
+        pad_embedding = self.thinker.text_model.embeds[self.talker.text_pad_token]
+        pad_embedding = torch.from_numpy(pad_embedding).reshape(1, 1, -1)
 
-        # # input_ids = torch.from_numpy(input_ids)
-        # print("input_ids", input_ids.shape)
+        thinker_reply_part = torch.cat(
+            [
+                thinker_reply_part[:, 1:, :],
+                eos_embedding,
+                pad_embedding,
+            ],
+            dim=1,
+        )
+        print("thinker_reply_part",thinker_reply_part.shape)
+        # input_ids = torch.from_numpy(input_ids)
+        print("input_ids", input_ids.shape)
 
-        # thinker_generate_ids = torch.tensor(output_token_ids).reshape(1, -1)
-        # print("thinker_generate_ids[:, :1]", thinker_generate_ids[:, :1].shape)
-        # talker_input_text_ids = torch.cat(
-        #     [
-        #         input_ids,
-        #         torch.tensor(
-        #             [[talker_text_bos_token]],
-        #             dtype=torch.long,
-        #         ),
-        #         thinker_generate_ids[:, :1],
-        #     ],
-        #     dim=-1,
-        # )
+        thinker_generate_ids = torch.tensor(output_token_ids).reshape(1, -1)
+        print("thinker_generate_ids",thinker_generate_ids)
+        print("thinker_generate_ids.shape", thinker_generate_ids.shape)
+        talker_input_text_ids = torch.cat(
+            [
+                input_ids,
+                torch.tensor(
+                    [[talker_text_bos_token]],
+                    dtype=torch.long,
+                ),
+                thinker_generate_ids[:,:1],
+            ],
+            dim=-1,
+        )
 
-        # talker_input_ids = torch.cat(
-        #     [
-        #         torch.full_like(
-        #             input_ids,
-        #             fill_value=self.talker.codec_mask_token,
-        #         ),
-        #         torch.tensor(
-        #             [[self.talker.codec_pad_token]],
-        #             dtype=torch.long,
-        #         ),
-        #         torch.tensor(
-        #             [[self.talker.codec_bos_token]],
-        #             dtype=torch.long,
-        #         ),
-        #     ],
-        #     dim=1,
-        # )
+        talker_input_ids = torch.cat(
+            [
+                torch.full_like(
+                    input_ids,
+                    fill_value=self.talker.codec_mask_token,
+                ),
+                torch.tensor(
+                    [[self.talker.codec_pad_token]],
+                    dtype=torch.long,
+                ),
+                torch.tensor(
+                    [[self.talker.codec_bos_token]],
+                    dtype=torch.long,
+                ),
+            ],
+            dim=1,
+        )
 
-        # talker_attention_mask = torch.cat(
-        #     [torch.ones(1, 334), torch.ones(1, 334).new_ones((1, 2))], dim=1
-        # )
+        talker_attention_mask = torch.cat(
+            [torch.ones(1, 334), torch.ones(1, 334).new_ones((1, 2))], dim=1
+        )
 
         with open("talker_input_ids", "rb") as f:
-                talker_input_ids = dill.load(f).float()
+                talker_input_ids_gt = dill.load(f).float()
 
         with open("talker_input_text_ids", "rb") as f:
-                talker_input_text_ids = dill.load(f).float()
+                talker_input_text_ids_gt = dill.load(f).float()
 
         with open("thinker_reply_part", "rb") as f:
-                thinker_reply_part = dill.load(f).float()
+                thinker_reply_part_gt =dill.load(f).float()
 
         with open("talker_inputs_embeds", "rb") as f:
-                talker_inputs_embeds = dill.load(f).float()
+                talker_inputs_embeds_gt = dill.load(f).float()
 
         with open("talker_attention_mask", "rb") as f:
-                talker_attention_mask = dill.load(f).float()
-                talker_attention_mask = talker_attention_mask.to(torch.long)
+                talker_attention_mask_gt = dill.load(f).float()
+                talker_attention_mask_gt = talker_attention_mask_gt.to(torch.long)
 
-        if os.path.exists("talker_generate_codes"):
-            with open("talker_generate_codes", "rb") as f:
-                talker_generate_codes = dill.load(f)
-        else:
-            talker_result = self.talker(
-                talker_input_ids.long(),
-                talker_input_text_ids,
-                thinker_reply_part,
-                talker_inputs_embeds,
-                talker_attention_mask,
-                suppress_tokens=[self.talker.codec_bos_token],
-            )
-            print("talker_result",talker_result)
-            talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
-            print("talker_generate_codes",talker_generate_codes)
-            talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
-            with open("talker_generate_codes", "wb") as f:
-                dill.dump(talker_generate_codes, f)
+
+        if not torch.equal(talker_input_ids,talker_input_ids_gt.long()):
+            print("talker_input_ids",talker_input_ids)
+            print("talker_input_ids_gt",talker_input_ids_gt)
+
+        if not torch.equal(talker_input_text_ids,talker_input_text_ids_gt.long()):
+            print("talker_input_text_ids",talker_input_text_ids)
+            print("talker_input_text_ids_gt",talker_input_text_ids_gt)
+
+        if not torch.equal(thinker_reply_part,thinker_reply_part_gt):
+            print("thinker_reply_part",thinker_reply_part)
+            print("thinker_reply_part_gt",thinker_reply_part_gt)
+
+            # thinker_reply_part = thinker_reply_part_gt
+
+        if not torch.equal(talker_inputs_embeds,talker_inputs_embeds_gt):
+            print("talker_inputs_embeds",talker_inputs_embeds)
+            print("talker_inputs_embeds_gt",talker_inputs_embeds_gt)
+
+        if not torch.equal(talker_attention_mask,talker_attention_mask_gt):
+            print("talker_attention_mask",talker_attention_mask.shape)
+            print("talker_attention_mask_gt", talker_attention_mask_gt.shape)
+
+        # if os.path.exists("talker_generate_codes"):
+        #     with open("talker_generate_codes", "rb") as f:
+        #         talker_generate_codes = dill.load(f)
+        # else:
+
+        talker_result = self.talker(
+            talker_input_ids.long(),
+            talker_input_text_ids,
+            thinker_reply_part,
+            talker_inputs_embeds,
+            talker_attention_mask,
+            suppress_tokens=[self.talker.codec_bos_token],
+        )
+        print("talker_result",talker_result)
+        talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
+        print("talker_generate_codes",talker_generate_codes)
+        talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
+            # with open("talker_generate_codes", "wb") as f:
+            #     dill.dump(talker_generate_codes, f)
         
         del self.thinker 
         del self.talker
