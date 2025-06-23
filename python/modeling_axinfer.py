@@ -222,7 +222,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             config.audio_config, f"{model_dir}/audio_tower.axmodel", run_dynamic=True
         )
         self.visual = Qwen2_5OmniVisionEncoder_AXInfer(
-            config.vision_config, f"{model_dir}/Qwen2.5-Omni-7B_vision.axmodel", run_dynamic=True
+            config.vision_config, f"{model_dir}/Qwen2.5-Omni-3B_vision.axmodel", run_dynamic=True
         )
         self.text_model = Qwen2_5OmniThinkerTextModel_AXInfer(
             config.text_config,
