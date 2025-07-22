@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 import torch.nn.functional as F
+import numpy as np
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniToken2WavDiTModel, RungeKutta4ODESolver, \
             Qwen2_5OmniToken2WavModel, Qwen2_5OmniToken2WavConfig, Qwen2_5OmniToken2WavBigVGANModel, Qwen2_5OmniBigVGANConfig, \
                 TorchActivation1d, SnakeBeta, kaiser_sinc_filter1d, AMPBlock, DownSample1d, Qwen2_5OmniDiTConfig,\
@@ -1018,6 +1019,22 @@ class Qwen2_5OmniToken2WavBigVGANModel_Export(Qwen2_5OmniToken2WavBigVGANModel):
     #     audio = torch.clamp(hidden, min=-1.0, max=1.0)  # bound the output to [-1, 1]
 
     #     return audio.squeeze().cpu()
+
+    def normalize_spectrogram(self, spectrogram, max_value, min_db):
+        return torch.clamp((2 * max_value) * ((spectrogram - min_db) / (-min_db)) - max_value, -max_value, max_value)
+
+    def amplitude_to_db(self, amplitude, min_db_level):
+        # min_level = torch.exp(
+        #     torch.tensor(min_db_level / 20.0 * np.log(10), device=amplitude.device, dtype=amplitude.dtype)
+        # )
+        min_level = min_db_level / 20.0 * np.log(10)
+        # return 20 * torch.log10(torch.clamp(amplitude, min=min_level))
+        return 20 / torch.log(torch.tensor(10)) * torch.clamp(amplitude, min=min_level)
+
+    def process_mel_spectrogram(self, mel_spectrogram):
+        # amplitude_spectrum = torch.exp(mel_spectrogram)
+        decibel_spectrum = self.amplitude_to_db(mel_spectrogram, -115) - 20
+        return self.normalize_spectrogram(decibel_spectrum, 1, -115)
 
     def forward(self, mel_spectrogram):
         # print("Qwen2_5OmniToken2WavBigVGANModel_Export apm_mel.shape",mel_spectrogram.shape)
