@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import onnxruntime as ort
-from axengine import InferenceSession
+from axengine import InferenceSession, axclrt_provider_name, axengine_provider_name
 from ml_dtypes import bfloat16
 # from scipy.special import softmax
 from transformers import AutoTokenizer
@@ -137,7 +137,7 @@ def post_process(input_ids, data, topk=1, topp=0.001, temperature=0.1, repetitio
 
 
 class InferEngine:
-    def __init__(self, path):
+    def __init__(self, path, provider_options=None):
         self.path = path
 
         model_type = os.path.splitext(path)[1]
@@ -145,14 +145,16 @@ class InferEngine:
         engine = None
         if model_type == ".onnx":
             engine = ort.InferenceSession
+            self.session = engine(path)
         elif model_type == ".axmodel":
             engine = InferenceSession
+            self.session = engine(path, provider_options=provider_options)
         else:
             raise NotImplementedError(f"Not supported model type: {model_type}")
 
         assert engine is not None
 
-        self.session = engine(path)
+        
 
     def run(self, outputnames, inputs, shape_group=None):
         if shape_group is None:
@@ -168,8 +170,8 @@ class InferEngine:
             del self.session
 
 class AxModelInferStatic:
-    def __init__(self, axmodel_path):
-        self.session = InferEngine(axmodel_path)
+    def __init__(self, axmodel_path, provider_options=None):
+        self.session = InferEngine(axmodel_path, provider_options=provider_options)
 
     def __call__(self, inputs, shape_group=None):
 
@@ -183,12 +185,12 @@ class AxModelInferStatic:
         self.session._unload()
 
 class AxModelInferDynamic:
-    def __init__(self, axmodel_path):
+    def __init__(self, axmodel_path, provider_options=None):
         self.axmodel_path = axmodel_path
-
+        self.provider_options = provider_options
     def __call__(self, inputs, shape_group=None):
 
-        session = InferEngine(self.axmodel_path)
+        session = InferEngine(self.axmodel_path, provider_options=self.provider_options)
         if shape_group is None:
             outputs = session.run(None, inputs)
         else:
@@ -198,11 +200,11 @@ class AxModelInferDynamic:
 
 
 class AxModelInfer:
-    def __init__(self, axmodel_path, run_dynamic=False):
+    def __init__(self, axmodel_path, run_dynamic=False, provider_options=None):
         if run_dynamic:
-            self.model = AxModelInferDynamic(axmodel_path)
+            self.model = AxModelInferDynamic(axmodel_path, provider_options=provider_options)
         else:
-            self.model = AxModelInferStatic(axmodel_path)
+            self.model = AxModelInferStatic(axmodel_path, provider_options=provider_options)
 
     def __call__(self, inputs, shape_group=None):
         try:
@@ -234,7 +236,7 @@ def lazyforward(func):
 
 class AxLMInfer:
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=True
+        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=True, provider_options=None
     ):
 
         self.cfg = cfg
@@ -247,7 +249,7 @@ class AxLMInfer:
 
         self.num_hidden_layers = self.cfg.num_hidden_layers
         self.hidden_size = self.cfg.hidden_size
-
+        self.provider_options = provider_options
         if not self.lazy_load:
             self._load()
         
@@ -258,11 +260,12 @@ class AxLMInfer:
             session = AxModelInfer(
                 f"{self.model_dir}/{self.model_name}_p{self.prefill_len}_l{i}_together.axmodel",
                 self.run_dynamic,
+                provider_options = self.provider_options
             )
             self.prefill_decoder_sessins.append(session)
         
         self.post_process_session = AxModelInfer(
-            f"{self.model_dir}/{self.model_name}_post.axmodel", self.run_dynamic
+            f"{self.model_dir}/{self.model_name}_post.axmodel", self.run_dynamic, provider_options=self.provider_options
         )
 
     def _unload(self):

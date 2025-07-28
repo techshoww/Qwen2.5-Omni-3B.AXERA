@@ -29,9 +29,9 @@ from utils_axinfer import AxModelInfer
 from utils_lm import Qwen2_5OmniTalkerModel_AXInfer, Qwen2_5OmniThinkerTextModel_AXInfer
 
 class Qwen2_5OmniAudioEncoder_AXInfer:
-    def __init__(self, config, axmodel_path, run_dynamic=False):
+    def __init__(self, config, axmodel_path, run_dynamic=False, provider_options=None):
         self.config = config
-        self.model = AxModelInfer(axmodel_path, run_dynamic)
+        self.model = AxModelInfer(axmodel_path, run_dynamic, provider_options=provider_options)
         self.n_window = config.n_window
         self.dtype = torch.bfloat16
 
@@ -175,9 +175,9 @@ class Qwen2_5OmniAudioEncoder_AXInfer:
 
 
 class Qwen2_5OmniVisionEncoder_AXInfer:
-    def __init__(self, config, axmodel_path, run_dynamic=False):
+    def __init__(self, config, axmodel_path, run_dynamic=False, provider_options=None):
         self.config = config
-        self.model = AxModelInfer(axmodel_path, run_dynamic)
+        self.model = AxModelInfer(axmodel_path, run_dynamic, provider_options=provider_options)
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.fullatt_block_indexes = config.fullatt_block_indexes
@@ -215,14 +215,14 @@ class Qwen2_5OmniVisionEncoder_AXInfer:
 
 
 class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
-    def __init__(self, config: Qwen2_5OmniThinkerConfig, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False):
+    def __init__(self, config: Qwen2_5OmniThinkerConfig, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False, provider_options=None):
 
         self.config = config
         self.audio_tower = Qwen2_5OmniAudioEncoder_AXInfer(
-            config.audio_config, f"{model_dir}/audio_tower.axmodel", run_dynamic=True
+            config.audio_config, f"{model_dir}/audio_tower.axmodel", run_dynamic=True , provider_options=[provider_options[0]]
         )
         self.visual = Qwen2_5OmniVisionEncoder_AXInfer(
-            config.vision_config, f"{model_dir}/Qwen2.5-Omni-3B_vision.axmodel", run_dynamic=True
+            config.vision_config, f"{model_dir}/Qwen2.5-Omni-3B_vision.axmodel", run_dynamic=True, provider_options=[provider_options[1]]
         )
         self.text_model = Qwen2_5OmniThinkerTextModel_AXInfer(
             config.text_config,
@@ -231,7 +231,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             prefill_len,
             lastN,
             run_dynamic,
-            lazy_load
+            lazy_load,
+            provider_options=[provider_options[2]]
         )
         self.processor = Qwen2_5OmniProcessor.from_pretrained(
             model_dir
@@ -381,7 +382,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
 
 
 class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
-    def __init__(self, cfg, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False,):
+    def __init__(self, cfg, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False,provider_options=None):
 
         self.thinker_to_talker_proj_prefill = AxModelInfer(
             f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.onnx"
@@ -390,7 +391,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
             f"{model_dir}/thinker_to_talker_proj_decode.onnx"
         )
         self.model = Qwen2_5OmniTalkerModel_AXInfer(
-            cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, run_dynamic, lazy_load
+            cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, run_dynamic, lazy_load, provider_options=provider_options
         )
         self.prefill_len = prefill_len
         self.text_eos_token = 151861
@@ -453,8 +454,8 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
 
 
 class Qwen2_5OmniToken2WavDiTModel_AxInfer:
-    def __init__(self, config, model_path, run_dynamic=False):
-        self.model = AxModelInfer(model_path, run_dynamic)
+    def __init__(self, config, model_path, run_dynamic=False, provider_options=None):
+        self.model = AxModelInfer(model_path, run_dynamic, provider_options=provider_options)
         self.mel_dim = config.mel_dim
         self.repeats = config.repeats
 
@@ -471,7 +472,7 @@ class Qwen2_5OmniToken2WavDiTModel_AxInfer:
             "x": x.cpu().numpy(),
             "cond": cond.cpu().numpy(),
             "spk": spk.cpu().numpy(),
-            "code": code.cpu().numpy(),
+            "code": code.cpu().numpy().astype(np.int32),
             "time": time.repeat(x.shape[0]).cpu().numpy(),
         }
         out = self.model(inputs)[0]
@@ -488,11 +489,12 @@ class Qwen2_5OmniToken2WavDiTModel_AxInfer:
         guidance_scale=0.5,
         sway_coefficient=-1.0,
     ):
-        y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
+        # y_all = torch.randn([1, 30000, self.mel_dim], dtype=ref_mel.dtype)
         max_duration = code.shape[1] * self.repeats
-        y0 = y_all[:, :max_duration].to(code.device)
+        # y0 = y_all[:, :max_duration].to(code.device)
+        y0 = torch.zeros([1, max_duration, self.mel_dim], dtype=ref_mel.dtype) # 1,1200,80
         batch = ref_mel.shape[0]
-        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)
+        cond = cond.unsqueeze(1).repeat(1, max_duration, 1)         # 1,1200,192
         assert batch == 1, "only support batch size = 1 currently"
 
         def fn(t, x):
@@ -525,8 +527,8 @@ class Qwen2_5OmniToken2WavDiTModel_AxInfer:
 
 
 class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
-    def __init__(self, config, model_path, run_dynamic=False):
-        self.model = AxModelInfer(model_path, run_dynamic)
+    def __init__(self, config, model_path, run_dynamic=False, provider_options=None):
+        self.model = AxModelInfer(model_path, run_dynamic, provider_options=provider_options)
 
     def __call__(self, apm_mel):
         inputs = {"apm_mel": apm_mel.cpu().numpy()}
@@ -536,12 +538,12 @@ class Qwen2_5OmniToken2WavBigVGANModel_AxInfer:
 
 
 class Qwen2_5OmniToken2WavModel_AxInfer:
-    def __init__(self, config, model_dir, run_dynamic=False):
+    def __init__(self, config, model_dir, run_dynamic=False, provider_options=None):
         self.code2wav_dit_model = Qwen2_5OmniToken2WavDiTModel_AxInfer(
-            config.dit_config, f"{model_dir}/token2wav_dit.onnx", run_dynamic
+            config.dit_config,   f"{model_dir}/token2wav_dit.axmodel", run_dynamic, provider_options=[provider_options[0]]
         )
         self.code2wav_bigvgan_model = Qwen2_5OmniToken2WavBigVGANModel_AxInfer(
-            config.bigvgan_config, f"{model_dir}/token2wav_bigvgan.onnx", run_dynamic=True
+            config.bigvgan_config, f"{model_dir}/token2wav_bigvgan.axmodel", run_dynamic, provider_options=[provider_options[1]]
         )
 
     def __call__(
@@ -563,8 +565,7 @@ class Qwen2_5OmniToken2WavModel_AxInfer:
             guidance_scale=guidance_scale,
             sway_coefficient=sway_coefficient,
         )
-
-        waveform = self.code2wav_bigvgan_model(mel_spectrogram)
+        waveform = self.code2wav_bigvgan_model(mel_spectrogram.contiguous())
         return waveform
 
 
@@ -585,7 +586,7 @@ class Qwen2_5OmniModel_AXInfer:
         self.prefill_len = prefill_len
         self.lastN = lastN
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AXInfer(
-            config.thinker_config, thinker_dir, prefill_len, lastN, run_dynamic, lazy_load
+            config.thinker_config, thinker_dir, prefill_len, lastN, run_dynamic, lazy_load, provider_options=[{"device_id":0},{"device_id":1},{"device_id":2}]
         )
 
         self.has_talker = enable_audio_output
@@ -598,10 +599,10 @@ class Qwen2_5OmniModel_AXInfer:
 
     def enable_talker(self, talker_dir, run_dynamic, lazy_load):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(
-            self.config.talker_config, talker_dir, self.prefill_len, self.lastN, run_dynamic, lazy_load
+            self.config.talker_config, talker_dir, self.prefill_len, self.lastN, run_dynamic, lazy_load, provider_options=[{"device_id":3}]
         )
         self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(
-            self.config.token2wav_config, talker_dir, run_dynamic=run_dynamic
+            self.config.token2wav_config, talker_dir, run_dynamic=run_dynamic, provider_options=[{"device_id":4},{"device_id":5}]
         )
         self.has_talker = True
 
@@ -624,7 +625,7 @@ class Qwen2_5OmniModel_AXInfer:
             input_ids,
             output_token_ids,
         ) = self.thinker(messages)
-
+        print("text output:",thinker_result)
         speaker_params = self.speaker_map[speaker]
         
         thinker_hidden_states = [
@@ -703,7 +704,7 @@ class Qwen2_5OmniModel_AXInfer:
         )
 
         talker_attention_mask = torch.cat(
-            [torch.ones(1, 334), torch.ones(1, 334).new_ones((1, 2))], dim=1
+            [torch.ones(1, input_ids.shape[1]), torch.ones(1, input_ids.shape[1]).new_ones((1, 2))], dim=1
         )
 
         talker_result = self.talker(
@@ -715,6 +716,7 @@ class Qwen2_5OmniModel_AXInfer:
             suppress_tokens=[self.talker.codec_bos_token],
         )
         talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
+        # np.savetxt("talker_generate_codes.txt",np.array(talker_generate_codes, dtype=np.int32), fmt="%d")
         talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
 
         effictive_len = talker_generate_codes.shape[1]
@@ -728,8 +730,8 @@ class Qwen2_5OmniModel_AXInfer:
 
         wav = self.token2wav(
             padded_talker_generate_codes.long(),
-            conditioning=speaker_params["cond"].float(),
-            reference_mel=speaker_params["ref_mel"].float(),
+            conditioning=speaker_params["cond"].float(),            # 1,192
+            reference_mel=speaker_params["ref_mel"].float(),        # 1,400,80
         )
         wav = wav[0 : effictive_len * 480]
         

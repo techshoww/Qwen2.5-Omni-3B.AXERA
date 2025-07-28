@@ -2,7 +2,6 @@ import os
 
 import numpy as np
 import onnxruntime as ort
-from axengine import InferenceSession
 from ml_dtypes import bfloat16
 # from scipy.special import softmax
 from transformers import AutoTokenizer
@@ -84,10 +83,10 @@ def do_logitnorm(scores):
 
 class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False
+        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False, provider_options=None
     ):
 
-        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load)
+        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load, provider_options=provider_options)
 
         self.embeds = np.load(f"{model_dir}/model.embed_tokens.weight.npy")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
@@ -264,9 +263,9 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
 
 class Qwen2_5OmniThinkerTextModel_AXInfer(AxLMInfer):
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False
+        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False, provider_options=None
     ):
-        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load)
+        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load, provider_options=provider_options)
         
         self.embeds = np.load(f"{model_dir}/model.embed_tokens.weight.npy")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
@@ -365,6 +364,7 @@ class Qwen2_5OmniThinkerTextModel_AXInfer(AxLMInfer):
     
         thinker_hidden_states.append(post_norm)
         next_token, posssible_tokens, possible_soft = self.post_process( post_out, topk=1)
+        print("-----------------------------next_token",next_token)
         token_ids.append(next_token)
 
         # set to decoder
@@ -412,7 +412,7 @@ class Qwen2_5OmniThinkerTextModel_AXInfer(AxLMInfer):
                 
                 next_token, posssible_tokens, possible_soft = self.post_process( post_out)
                 token_ids.append(next_token)
-                
+                print("-----------------------------next_token",next_token)
             if next_token == self.tokenizer.eos_token_id:
                 print("hit eos!")
                 break

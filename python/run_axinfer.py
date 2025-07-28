@@ -8,7 +8,7 @@ prefill_len=352
 lastN=1023
 
 config = Qwen2_5OmniConfig.from_pretrained(thinker_dir)
-model = Qwen2_5OmniModel_AXInfer(config, thinker_dir, talker_dir, prefill_len, lastN,  run_dynamic=False, lazy_load=True)
+model = Qwen2_5OmniModel_AXInfer(config, thinker_dir, talker_dir, prefill_len, lastN,  run_dynamic=False, lazy_load=False)
 
 video_path = "2.mp4"
 messages = [
