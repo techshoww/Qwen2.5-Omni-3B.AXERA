@@ -236,13 +236,14 @@ def lazyforward(func):
 
 class AxLMInfer:
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=True, provider_options=None
+        self, cfg, model_dir, model_name, prefill_len, lastN, chunk_len=-1, run_dynamic=False, lazy_load=True, provider_options=None
     ):
 
         self.cfg = cfg
         self.model_dir = model_dir
         self.model_name = model_name
         self.prefill_len = prefill_len
+        self.chunk_len = chunk_len if chunk_len>0 else prefill_len
         self.lastN = lastN
         self.run_dynamic = run_dynamic
         self.lazy_load = lazy_load and (not run_dynamic)
@@ -258,7 +259,7 @@ class AxLMInfer:
         for i in range(self.num_hidden_layers):
             
             session = AxModelInfer(
-                f"{self.model_dir}/{self.model_name}_p{self.prefill_len}_l{i}_together.axmodel",
+                f"{self.model_dir}/{self.model_name}_p{self.chunk_len}_l{i}_together.axmodel",
                 self.run_dynamic,
                 provider_options = self.provider_options
             )

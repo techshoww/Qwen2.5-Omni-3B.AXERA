@@ -27,6 +27,7 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
 from utils import get_chunked_index, get_llm_pos_ids_for_vision, get_rope_index
 from utils_axinfer import AxModelInfer
 from utils_lm import Qwen2_5OmniTalkerModel_AXInfer, Qwen2_5OmniThinkerTextModel_AXInfer
+import time 
 
 class Qwen2_5OmniAudioEncoder_AXInfer:
     def __init__(self, config, axmodel_path, run_dynamic=False, provider_options=None):
@@ -215,7 +216,7 @@ class Qwen2_5OmniVisionEncoder_AXInfer:
 
 
 class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
-    def __init__(self, config: Qwen2_5OmniThinkerConfig, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False, provider_options=None):
+    def __init__(self, config: Qwen2_5OmniThinkerConfig, model_dir, prefill_len, lastN=1023, chunk_len=-1, run_dynamic=False, lazy_load=False, provider_options=None):
 
         self.config = config
         self.audio_tower = Qwen2_5OmniAudioEncoder_AXInfer(
@@ -230,6 +231,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
             "qwen2_5_omni_text",
             prefill_len,
             lastN,
+            chunk_len,
             run_dynamic,
             lazy_load,
             provider_options=[provider_options[2]]
@@ -382,16 +384,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration_AXInfer:
 
 
 class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
-    def __init__(self, cfg, model_dir, prefill_len, lastN=1023, run_dynamic=False, lazy_load=False,provider_options=None):
+    def __init__(self, cfg, model_dir, prefill_len, lastN=1023, chunk_len=-1, run_dynamic=False, lazy_load=False,provider_options=None):
 
         self.thinker_to_talker_proj_prefill = AxModelInfer(
-            f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.onnx"
+            f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.axmodel"
         )
         self.thinker_to_talker_proj = AxModelInfer(
-            f"{model_dir}/thinker_to_talker_proj_decode.onnx"
+            f"{model_dir}/thinker_to_talker_proj_decode.axmodel"
         )
         self.model = Qwen2_5OmniTalkerModel_AXInfer(
-            cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, run_dynamic, lazy_load, provider_options=provider_options
+            cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, chunk_len, run_dynamic, lazy_load, provider_options=provider_options
         )
         self.prefill_len = prefill_len
         self.text_eos_token = 151861
@@ -577,6 +579,7 @@ class Qwen2_5OmniModel_AXInfer:
         talker_dir,
         prefill_len,
         lastN=1023,
+        chunk_len=-1,
         max_len_talker_generate_codes=600,
         run_dynamic=False,
         lazy_load=False,
@@ -584,9 +587,10 @@ class Qwen2_5OmniModel_AXInfer:
     ):
         self.config = config
         self.prefill_len = prefill_len
+        self.chunk_len = chunk_len
         self.lastN = lastN
         self.thinker = Qwen2_5OmniThinkerForConditionalGeneration_AXInfer(
-            config.thinker_config, thinker_dir, prefill_len, lastN, run_dynamic, lazy_load, provider_options=[{"device_id":0},{"device_id":1},{"device_id":2}]
+            config.thinker_config, thinker_dir, prefill_len, lastN, chunk_len, run_dynamic, lazy_load, provider_options=[{"device_id":0},{"device_id":1},{"device_id":2}]
         )
 
         self.has_talker = enable_audio_output
@@ -599,7 +603,7 @@ class Qwen2_5OmniModel_AXInfer:
 
     def enable_talker(self, talker_dir, run_dynamic, lazy_load):
         self.talker = Qwen2_5OmniTalkerForConditionalGeneration_AXInfer(
-            self.config.talker_config, talker_dir, self.prefill_len, self.lastN, run_dynamic, lazy_load, provider_options=[{"device_id":3}]
+            self.config.talker_config, talker_dir, self.prefill_len, self.lastN, self.chunk_len, run_dynamic, lazy_load, provider_options=[{"device_id":3}]
         )
         self.token2wav = Qwen2_5OmniToken2WavModel_AxInfer(
             self.config.token2wav_config, talker_dir, run_dynamic=run_dynamic, provider_options=[{"device_id":4},{"device_id":5}]
@@ -706,7 +710,8 @@ class Qwen2_5OmniModel_AXInfer:
         talker_attention_mask = torch.cat(
             [torch.ones(1, input_ids.shape[1]), torch.ones(1, input_ids.shape[1]).new_ones((1, 2))], dim=1
         )
-
+        print("input_ids.shape:",input_ids.shape)
+        t1 = time.time()
         talker_result = self.talker(
             talker_input_ids.long(),
             talker_input_text_ids,
@@ -715,6 +720,8 @@ class Qwen2_5OmniModel_AXInfer:
             talker_attention_mask,
             suppress_tokens=[self.talker.codec_bos_token],
         )
+        t2 = time.time()
+        print("talker use time(s):", t2-t1)
         talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
         # np.savetxt("talker_generate_codes.txt",np.array(talker_generate_codes, dtype=np.int32), fmt="%d")
         talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)

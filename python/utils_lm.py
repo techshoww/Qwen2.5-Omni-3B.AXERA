@@ -7,6 +7,7 @@ from ml_dtypes import bfloat16
 from transformers import AutoTokenizer
 import gc
 import dill 
+import math
 import torch
 from torch import nn
 from utils_axinfer import AxModelInfer, AxLMInfer
@@ -83,10 +84,10 @@ def do_logitnorm(scores):
 
 class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False, provider_options=None
+        self, cfg, model_dir, model_name, prefill_len, lastN, chunk_len=-1, run_dynamic=False, lazy_load=False, provider_options=None
     ):
 
-        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load, provider_options=provider_options)
+        super().__init__(cfg, model_dir, model_name, prefill_len, lastN, chunk_len, run_dynamic, lazy_load, provider_options=provider_options)
 
         self.embeds = np.load(f"{model_dir}/model.embed_tokens.weight.npy")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
@@ -96,6 +97,10 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
             f"thinker_to_talker_proj.onnx", 
             run_dynamic
         )
+
+        
+        self.total_prefill = prefill_len
+        self.chunk_len = chunk_len
 
     def post_process(self, input_ids, data, topk=1, topp=0.001, temperature=0.1, repetition_penalty=None, suppress_tokens=None, do_sample=True):
         def top_p(l: np.ndarray, p: float) -> np.ndarray:
@@ -168,11 +173,11 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
             * self.cfg.num_key_value_heads
         )
         k_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=np.float32)
+            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
             for _ in range(self.cfg.num_hidden_layers)
         ]
         v_caches = [
-            np.zeros((1, self.lastN, kv_dim), dtype=np.float32)
+            np.zeros((1, self.lastN, kv_dim), dtype=bfloat16)
             for _ in range(self.cfg.num_hidden_layers)
         ]
 
@@ -181,25 +186,59 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
         indices = np.zeros((3, self.prefill_len), dtype=np.uint32)
         indices[:, 0:token_len] = position_ids.squeeze(1).numpy().astype(np.uint32)
         mask = np.zeros((1, self.prefill_len, self.prefill_len)) - 65536
-        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(np.float32)
+        data = np.zeros((1, self.prefill_len, self.hidden_size)).astype(bfloat16)
         data[:, 0:token_len] = hidden_states
         for i in range(token_len):
             mask[:, i, : i + 1] = 0
 
         mask = mask.astype(bfloat16)
+        chunk_num = math.ceil(token_len / self.chunk_len)
         for i in range(self.num_hidden_layers):
-            input_feed = {
-                "K_cache": np.zeros((1, 1, self.hidden_size), dtype=np.float32),
-                "V_cache": np.zeros((1, 1, self.hidden_size), dtype=np.float32),
-                "indices": indices,
-                "input": data,
-                "mask": mask,
-            }
-            outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
+            if self.chunk_len <= 0:
+                input_feed = {
+                    "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                    "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                    "indices": indices,
+                    "input": data,
+                    "mask": mask,
+                }
+                outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
 
-            k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
-            v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
-            data[:, 0:token_len] = outputs[2][:, :token_len, :]
+                k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
+                v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
+                data[:, 0:token_len] = outputs[2][:, :token_len, :]
+            else:
+                layer_output = []
+                for ck in range(chunk_num):
+                    
+                    gid = ck + 1
+                    if ck==0:
+                        input_feed = {
+                            "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                            "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                            "indices": indices[:, 0:self.chunk_len],
+                            "input": data[:, 0:self.chunk_len],
+                            "mask": mask[:, 0:self.chunk_len, 0:self.chunk_len],
+                        }
+                        outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=gid)
+                        k_caches[i][:, :self.chunk_len, :] = outputs[0][:, :self.chunk_len, :]
+                        v_caches[i][:, :self.chunk_len, :] = outputs[1][:, :self.chunk_len, :]
+
+                    else:
+                        input_feed = {
+                            "K_cache": k_caches[i][:, :ck*self.chunk_len, :],
+                            "V_cache": v_caches[i][:, :ck*self.chunk_len, :],
+                            "indices": indices[:, ck*self.chunk_len:(ck+1)*self.chunk_len],
+                            "input": data[:, ck*self.chunk_len:(ck+1)*self.chunk_len],
+                            "mask": mask[:, ck*self.chunk_len:(ck+1)*self.chunk_len, 0:(ck+1)*self.chunk_len],
+                        }
+                        outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=gid)
+                        k_caches[i][:, ck*self.chunk_len:(ck+1)*self.chunk_len, :] = outputs[0][:, :self.chunk_len, :]
+                        v_caches[i][:, ck*self.chunk_len:(ck+1)*self.chunk_len, :] = outputs[1][:, :self.chunk_len, :]
+
+                    layer_output.append(outputs[2][:, :self.chunk_len, :])
+                
+                data = np.concatenate(layer_output, axis=1)
 
         post_out = self.post_process_session(
             {"input": data[:, token_len - 1 : token_len, :]}
@@ -228,7 +267,7 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
                 thinker_reply_part = thinker_reply_part[:, 1:, :]
             inputs_embeds = self.thinker_to_talker_proj({"input": inputs_embeds})[0]
 
-            data = inputs_embeds
+            data = inputs_embeds.astype(bfloat16)
             
             for i in range(self.cfg.num_hidden_layers):
                 input_feed = {
@@ -263,13 +302,15 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
 
 class Qwen2_5OmniThinkerTextModel_AXInfer(AxLMInfer):
     def __init__(
-        self, cfg, model_dir, model_name, prefill_len, lastN, run_dynamic=False, lazy_load=False, provider_options=None
+        self, cfg, model_dir, model_name, prefill_len, lastN, chunk_len=-1, run_dynamic=False, lazy_load=False, provider_options=None
     ):
-        super().__init__(cfg, model_dir, model_name, prefill_len, lastN,  run_dynamic, lazy_load, provider_options=provider_options)
+        super().__init__(cfg, model_dir, model_name, prefill_len, lastN, chunk_len, run_dynamic, lazy_load, provider_options=provider_options)
         
         self.embeds = np.load(f"{model_dir}/model.embed_tokens.weight.npy")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-        
+
+        self.total_prefill = prefill_len
+        self.chunk_len = chunk_len        
 
     def post_process(self, data, topk=1, topp=0.001, temperature=0.1):
         def top_p(l: np.ndarray, p: float) -> np.ndarray:
@@ -337,19 +378,54 @@ class Qwen2_5OmniThinkerTextModel_AXInfer(AxLMInfer):
             mask[:, i, : i + 1] = 0
 
         mask = mask.astype(bfloat16)
+        chunk_num = math.ceil(token_len / self.chunk_len)
         for i in range(self.num_hidden_layers):
-            input_feed = {
-                "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
-                "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
-                "indices": indices,
-                "input": data,
-                "mask": mask,
-            }
-            outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
 
-            k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
-            v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
-            data[:, 0:token_len] = outputs[2][:, :token_len, :]
+            if self.chunk_len <= 0:
+                input_feed = {
+                    "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                    "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                    "indices": indices,
+                    "input": data,
+                    "mask": mask,
+                }
+                outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=1)
+
+                k_caches[i][:, :token_len, :] = outputs[0][:, :token_len, :]
+                v_caches[i][:, :token_len, :] = outputs[1][:, :token_len, :]
+                data[:, 0:token_len] = outputs[2][:, :token_len, :]
+            else:
+                layer_output = []
+                for ck in range(chunk_num):
+                    
+                    gid = ck + 1
+                    if ck==0:
+                        input_feed = {
+                            "K_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                            "V_cache": np.zeros((1, 1, self.hidden_size), dtype=bfloat16),
+                            "indices": indices[:, 0:self.chunk_len],
+                            "input": data[:, 0:self.chunk_len],
+                            "mask": mask[:, 0:self.chunk_len, 0:self.chunk_len],
+                        }
+                        outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=gid)
+                        k_caches[i][:, :self.chunk_len, :] = outputs[0][:, :self.chunk_len, :]
+                        v_caches[i][:, :self.chunk_len, :] = outputs[1][:, :self.chunk_len, :]
+
+                    else:
+                        input_feed = {
+                            "K_cache": k_caches[i][:, :ck*self.chunk_len, :],
+                            "V_cache": v_caches[i][:, :ck*self.chunk_len, :],
+                            "indices": indices[:, ck*self.chunk_len:(ck+1)*self.chunk_len],
+                            "input": data[:, ck*self.chunk_len:(ck+1)*self.chunk_len],
+                            "mask": mask[:, ck*self.chunk_len:(ck+1)*self.chunk_len, 0:(ck+1)*self.chunk_len],
+                        }
+                        outputs = self.prefill_decoder_sessins[i](input_feed, shape_group=gid)
+                        k_caches[i][:, ck*self.chunk_len:(ck+1)*self.chunk_len, :] = outputs[0][:, :self.chunk_len, :]
+                        v_caches[i][:, ck*self.chunk_len:(ck+1)*self.chunk_len, :] = outputs[1][:, :self.chunk_len, :]
+
+                    layer_output.append(outputs[2][:, :self.chunk_len, :])
+                
+                data = np.concatenate(layer_output, axis=1)
 
         post_out = self.post_process_session(
             {"input": data[:, token_len - 1 : token_len, :]}
