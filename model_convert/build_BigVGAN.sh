@@ -1,2 +1,1 @@
-pulsar2 build --input token2wav_bigvgan.onnx --config config_token2wav_bigvgan.json --output_dir build-output-bigvgan --output_name token2wav_bigvgan.axmodel --target_hardware AX650 --compiler.check 0 #--debug.disable_auto_set_extremum_op_fp32 true
-
+pulsar2 build --input token2wav_bigvgan.onnx --config config_token2wav_bigvgan.json --output_dir build-output-bigvgan --output_name token2wav_bigvgan.axmodel --target_hardware AX650 --compiler.check  3 --compiler.check_cosine_simularity 0.98 #--debug.disable_auto_set_extremum_op_fp32 true

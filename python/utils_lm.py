@@ -94,7 +94,7 @@ class Qwen2_5OmniTalkerModel_AXInfer(AxLMInfer):
         
 
         self.thinker_to_talker_proj = AxModelInfer(
-            f"{model_dir}/thinker_to_talker_proj.axmodel", 
+            f"{model_dir}/thinker_to_talker_proj_decode.onnx", 
             run_dynamic
         )
 

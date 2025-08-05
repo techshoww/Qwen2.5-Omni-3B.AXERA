@@ -387,10 +387,10 @@ class Qwen2_5OmniTalkerForConditionalGeneration_AXInfer:
     def __init__(self, cfg, model_dir, prefill_len, lastN=1023, chunk_len=-1, run_dynamic=False, lazy_load=False,provider_options=None):
 
         self.thinker_to_talker_proj_prefill = AxModelInfer(
-            f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.axmodel"
+            f"{model_dir}/thinker_to_talker_proj_prefill_{prefill_len}.onnx"
         )
         self.thinker_to_talker_proj = AxModelInfer(
-            f"{model_dir}/thinker_to_talker_proj_decode.axmodel"
+            f"{model_dir}/thinker_to_talker_proj_decode.onnx"
         )
         self.model = Qwen2_5OmniTalkerModel_AXInfer(
             cfg, model_dir, "qwen2_5_omni_talker", prefill_len, lastN, chunk_len, run_dynamic, lazy_load, provider_options=provider_options
@@ -723,7 +723,7 @@ class Qwen2_5OmniModel_AXInfer:
         t2 = time.time()
         print("talker use time(s):", t2-t1)
         talker_generate_codes = talker_result[talker_input_ids.shape[1] : -1]
-        # np.savetxt("talker_generate_codes.txt",np.array(talker_generate_codes, dtype=np.int32), fmt="%d")
+        np.savetxt("talker_generate_codes.txt",np.array(talker_generate_codes, dtype=np.int32), fmt="%d")
         talker_generate_codes = torch.tensor(talker_generate_codes).reshape(1, -1)
 
         effictive_len = talker_generate_codes.shape[1]
@@ -736,9 +736,9 @@ class Qwen2_5OmniModel_AXInfer:
         ]
 
         wav = self.token2wav(
-            padded_talker_generate_codes.long(),
-            conditioning=speaker_params["cond"].float(),            # 1,192
-            reference_mel=speaker_params["ref_mel"].float(),        # 1,400,80
+            padded_talker_generate_codes.long().contiguous(),
+            conditioning=speaker_params["cond"].float().contiguous(),            # 1,192
+            reference_mel=speaker_params["ref_mel"].float().contiguous(),        # 1,400,80
         )
         wav = wav[0 : effictive_len * 480]
         
